@@ -5,20 +5,20 @@ use tracing_subscriber::prelude::*;
 use tracing_systemd::SystemdLayer;
 fn main() {
     tracing_subscriber::registry()
-        .with(SystemdLayer::new())
+        .with(SystemdLayer::new().with_target(true))
         .init();
 
-    root_log_fn();
+    root_log_fn(true);
 }
 
-#[instrument]
-fn root_log_fn() {
+#[instrument(fields(outside_instrument_field = true))]
+fn root_log_fn(outside_instrument_field: bool) {
     info!("Root log");
     inner_log_1(true);
 }
 
-#[instrument(fields(instrument_field = true))]
-fn inner_log_1(parameter_field: bool) {
+#[instrument(fields(inside_instrument_field = true))]
+fn inner_log_1(inside_parameter_field: bool) {
     trace!("this is a trace");
     debug!(field_in_function = "also works");
     info!("this is an info log");
