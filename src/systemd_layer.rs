@@ -10,7 +10,16 @@ use crate::formatting::*;
 use helper_structs::*;
 #[cfg(feature = "sd-journal")]
 use sd_journal::*;
-///A configurable tracing-subscriber layer compatible with journald
+
+///A configurable tracing-subscriber layer compatible with journald.
+///
+///The layer used to format and log events. Can be configured to log to stdout, or directly to journald using the `sd-journal` feature.
+///```rust  
+///let systemd_layer = SystemdLayer::new()
+///    .with_target(true)
+///    .use_level_prefix(false)
+///    .use_color(true);
+///```
 pub struct SystemdLayer {
     #[cfg(feature = "colored")]
     use_color: bool,

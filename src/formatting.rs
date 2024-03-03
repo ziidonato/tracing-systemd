@@ -9,7 +9,7 @@ use sd_journal::Level;
 ///Converts a tracing level to a sd-journal level<br>
 ///Only available if the feature "sd-journal" is enabled
 #[cfg(feature = "sd-journal")]
-pub fn journal_level_from_tracing_level(level: &tracing::Level) -> Level {
+pub(crate) fn journal_level_from_tracing_level(level: &tracing::Level) -> Level {
     match level {
         &tracing::Level::TRACE => Level::Debug,
         &tracing::Level::DEBUG => Level::Info,
@@ -20,7 +20,8 @@ pub fn journal_level_from_tracing_level(level: &tracing::Level) -> Level {
     }
 }
 
-pub fn prefix_from_tracing_level(level: &tracing::Level) -> String {
+///Generates the journald prefix from a tracing level<br>
+pub(crate) fn prefix_from_tracing_level(level: &tracing::Level) -> String {
     match level {
         &tracing::Level::TRACE => "<7>".to_string(),
         &tracing::Level::DEBUG => "<6>".to_string(),
@@ -34,7 +35,7 @@ pub fn prefix_from_tracing_level(level: &tracing::Level) -> String {
 impl SystemdLayer {
     ///Builds the span name<br/>
     ///includes arguments, fields, and the function name
-    pub fn build_span_name(&self, span: &serde_json::Value) -> String {
+    pub(crate) fn build_span_name(&self, span: &serde_json::Value) -> String {
         let name = span["name"].as_str().unwrap();
 
         let mut arguments_string = String::new();
@@ -59,6 +60,7 @@ impl SystemdLayer {
     }
 
     /// Builds the span chain
+    /// Responsible for putting the spans together
     fn build_span_chain(&self, output: &serde_json::Value) -> String {
         let target = output["target"].as_str().unwrap();
         let mut span_chain = String::new();
@@ -80,16 +82,11 @@ impl SystemdLayer {
     }
 
     /// Builds the full string to be logged
-    pub fn build_full_string(&self, output: &serde_json::Value) -> String {
+    pub(crate) fn build_full_string(&self, output: &serde_json::Value) -> String {
         let span_chain = self.build_span_chain(&output);
 
         let spans = output["spans"].as_array().unwrap();
         let function_name = self.build_span_name(spans.last().unwrap());
-
-        let message = match output["fields"]["message"].as_str() {
-            Some(message) => message,
-            None => "",
-        };
 
         let level = output["level"].as_str().unwrap().to_string();
 
@@ -109,6 +106,11 @@ impl SystemdLayer {
         if self.get_use_color() {
             full_string = format!("{} {}{}", colored_level, span_chain, function_name);
         }
+
+        let message = match output["fields"]["message"].as_str() {
+            Some(message) => message,
+            None => "",
+        };
 
         if message.len() > 0 {
             full_string.push_str(self.get_message_separator());

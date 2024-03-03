@@ -3,11 +3,9 @@
 //! Provides a `Layer` implementation for use with `tracing-subscriber` that can be configured.
 //! Shows all spans and arguments.
 
-//
 mod formatting;
-
-///The main module for the SystemdLayer and its implementations
 mod systemd_layer;
+
 pub use systemd_layer::SystemdLayer;
 
 #[cfg(test)]
