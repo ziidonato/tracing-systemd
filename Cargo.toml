@@ -7,6 +7,8 @@ description = "A tracing subscriber that logs to the systemd journal"
 repository = "https://github.com/ziidonato/tracing-systemd"
 readme = "README.md"
 
+exclude = [".vscode"]
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
