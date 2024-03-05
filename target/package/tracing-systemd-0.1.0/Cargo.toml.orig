@@ -1,0 +1,28 @@
+[package]
+name = "tracing-systemd"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "A tracing subscriber that logs to the systemd journal"
+repository = "https://github.com/ziidonato/tracing-systemd"
+readme = "README.md"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+sd-journal = { version = "0.1.0", optional = true }
+colored = { version = "2.1.0", optional = true }
+serde_json = "1.0.113"
+tracing = "0.1.40"
+tracing-subscriber = "0.3.18"
+
+[features]
+default = ["colored"]
+
+[[example]]
+name = "test_log_stdout"
+required-features = ["colored"]
+
+[[example]]
+name = "test_log_systemd"
+required-features = ["sd-journal", "colored"]

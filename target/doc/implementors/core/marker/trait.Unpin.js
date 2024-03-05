@@ -1,0 +1,3 @@
+(function() {var implementors = {
+"tracing_systemd":[["impl <a class=\"trait\" href=\"https://doc.rust-lang.org/1.74.1/core/marker/trait.Unpin.html\" title=\"trait core::marker::Unpin\">Unpin</a> for <a class=\"struct\" href=\"tracing_systemd/struct.SystemdLayer.html\" title=\"struct tracing_systemd::SystemdLayer\">SystemdLayer</a>",1,["tracing_systemd::systemd_layer::SystemdLayer"]]]
+};if (window.register_implementors) {window.register_implementors(implementors);} else {window.pending_implementors = implementors;}})()
