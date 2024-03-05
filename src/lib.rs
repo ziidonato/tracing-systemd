@@ -1,6 +1,6 @@
 //! `tracing-subscriber` layer for logging to the systemd journal
 //!
-//! Provides a `Layer` implementation for use with `tracing-subscriber` that can be configured.
+//! Provides a [`SystemdLayer`] implementation for use with `tracing-subscriber` that can be configured.
 //! Shows all spans and arguments.
 //!
 //! # Features
