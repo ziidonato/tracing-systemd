@@ -25,9 +25,9 @@ pub struct SystemdLayer {
     use_color: bool,
 
     log_thread_id: bool,
-    filter_crate: bool,
     span_separator: &'static str,
     message_separator: &'static str,
+    level_separator: &'static str,
     log_target: bool,
     #[cfg(feature = "sd-journal")]
     use_sd_journal: bool,
@@ -36,6 +36,8 @@ pub struct SystemdLayer {
     arguments_equality: &'static str,
     arguments_separator: &'static str,
     use_level_prefix: bool,
+    thread_id_prefix: &'static str,
+    thread_id_suffix: &'static str,
 }
 
 // Implementation of the Layer trait
@@ -45,13 +47,6 @@ where
     S: for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
     fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
-        let current_crate = std::env::current_exe().unwrap();
-        let current_crate = current_crate.file_stem().unwrap().to_str().unwrap();
-
-        if self.filter_crate && event.metadata().target() != current_crate {
-            return;
-        }
-
         let scope = ctx.event_scope(event).unwrap();
         let mut spans = vec![];
 

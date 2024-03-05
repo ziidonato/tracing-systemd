@@ -9,7 +9,8 @@ fn main() {
             SystemdLayer::new()
                 .with_target(true)
                 .use_level_prefix(false)
-                .use_color(true),
+                .use_color(true)
+                .with_thread_ids(true),
         )
         .init();
 

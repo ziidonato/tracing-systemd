@@ -28,7 +28,6 @@ pub(crate) fn prefix_from_tracing_level(level: &tracing::Level) -> String {
         &tracing::Level::INFO => "<5>".to_string(),
         &tracing::Level::WARN => "<4>".to_string(),
         &tracing::Level::ERROR => "<3>".to_string(),
-        _ => "<5>".to_string(),
     }
 }
 
@@ -100,11 +99,55 @@ impl SystemdLayer {
             _ => level.normal(),
         };
 
-        let mut full_string = format!("{} {}{}", level, span_chain, function_name);
+        let thread_id = std::thread::current().id();
+        let thread_id_str = format!("{:?}", thread_id);
+        let thread_id_int = thread_id_str.split("(").collect::<Vec<&str>>()[1]
+            .split(")")
+            .collect::<Vec<&str>>()[0];
+
+        let mut full_string = format!(
+            "{}{}{}{}",
+            level,
+            self.get_level_separator(),
+            span_chain,
+            function_name
+        );
+
+        if self.get_log_thread_id() {
+            full_string = format!(
+                "{}{}{}{}{}{}{}",
+                level,
+                self.get_level_separator(),
+                self.get_thread_id_prefix(),
+                thread_id_int,
+                self.get_thread_id_suffix(),
+                span_chain,
+                function_name
+            );
+        }
 
         #[cfg(feature = "colored")]
         if self.get_use_color() {
-            full_string = format!("{} {}{}", colored_level, span_chain, function_name);
+            if self.get_log_thread_id() {
+                full_string = format!(
+                    "{}{}{}{}{}{}{}",
+                    colored_level,
+                    self.get_level_separator(),
+                    self.get_thread_id_prefix(),
+                    thread_id_int,
+                    self.get_thread_id_suffix(),
+                    span_chain,
+                    function_name
+                );
+            } else {
+                full_string = format!(
+                    "{}{}{}{}",
+                    colored_level,
+                    self.get_level_separator(),
+                    span_chain,
+                    function_name
+                );
+            }
         }
 
         let message = match output["fields"]["message"].as_str() {
