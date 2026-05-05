@@ -4,28 +4,16 @@
 [![docs.rs](https://img.shields.io/docsrs/tracing-systemd)](https://docs.rs/tracing-systemd)
 [![MSRV](https://img.shields.io/badge/MSRV-1.85-blue)](#msrv)
 
-A [`tracing-subscriber`](https://docs.rs/tracing-subscriber) `Layer` that pretty-prints
-span chains to stdout and (optionally) the systemd journal.
+A [`tracing-subscriber`](https://docs.rs/tracing-subscriber) layer that prints span chains
+to stdout in a format that's easy to read locally and easy to ingest into the systemd
+journal when run under a unit.
 
 ```text
 INFO [1] my_app::request(method: "GET", path: "/api")::handler(): served in 4ms
 WARN [1] my_app::request(method: "POST", path: "/api")::handler(): retrying: {attempt: 2}
 ```
 
-## What's new in 0.2
-
-- **No more `libsystemd-dev` build dependency.** Journald support now goes through the
-  official [`tracing-journald`](https://docs.rs/tracing-journald) layer (pure Rust,
-  speaks the native journal socket protocol).
-- **Robustness**: every `.unwrap()` removed; the layer never panics on degenerate
-  span/field states.
-- **More customizable**: `Cow<'static, str>` separators (so you can pass owned `String`s),
-  pluggable [`ColorTheme`], optional timestamps, custom [`Output`] writers (great for tests).
-- **Better defaults**: `ColorMode::Auto` respects `NO_COLOR` and TTY status out of the box.
-- **Documented**: `#![deny(missing_docs)]`, working doctests, docs.rs metadata, full migration table below.
-- **Modern toolchain**: edition 2024, MSRV 1.85, `#![forbid(unsafe_code)]`, clippy::pedantic clean.
-
-## Quick start
+## Usage
 
 ```toml
 [dependencies]
@@ -48,15 +36,17 @@ fn main() {
 }
 ```
 
+See `examples/` for more.
+
 ## Features
 
-| Feature    | Default | Effect                                                                                        |
-|------------|---------|-----------------------------------------------------------------------------------------------|
-| `colors`   | yes     | ANSI color output via [`nu-ansi-term`](https://docs.rs/nu-ansi-term).                         |
-| `journald` | no      | Re-exports [`tracing-journald`](https://docs.rs/tracing-journald) under `tracing_systemd::journald`. Pure Rust; no `libsystemd-dev` needed. |
+| Feature    | Default | Effect |
+|------------|---------|--------|
+| `colors`   | yes     | ANSI color output via [`nu-ansi-term`](https://docs.rs/nu-ansi-term). |
+| `journald` | no      | Re-exports [`tracing-journald`](https://docs.rs/tracing-journald) under `tracing_systemd::journald`. |
 | `json`     | no      | Pulls in [`serde_json`](https://docs.rs/serde_json) (reserved for a future JSON output mode). |
 
-Disable color output with `default-features = false`:
+To turn off color output:
 
 ```toml
 tracing-systemd = { version = "0.2", default-features = false }
@@ -64,22 +54,22 @@ tracing-systemd = { version = "0.2", default-features = false }
 
 ## Logging to the journal
 
-Two patterns, depending on how your binary is invoked.
+There are two ways to get logs into journald, depending on how the binary is started.
 
-**Under a systemd unit** (most common): the unit's stdout/stderr is already routed to the
-journal. Just use `SystemdLayer::stdout()` with the level prefix on (it's the default), and
-`journalctl` will pick up the syslog priority from the `<3>`–`<7>` markers.
+If your binary runs under a systemd unit, its stdout/stderr is already piped to the
+journal. The default `SystemdLayer::stdout()` emits the `<3>`–`<7>` syslog priority
+prefix that `journalctl` uses to assign levels, so you don't need anything else:
 
 ```rust
 # use tracing_subscriber::prelude::*;
 # use tracing_systemd::SystemdLayer;
 tracing_subscriber::registry()
-    .with(SystemdLayer::stdout())   // level prefix `<5>` etc. is emitted by default
+    .with(SystemdLayer::stdout())
     .init();
 ```
 
-**Outside a unit**, e.g. running locally for development: enable the `journald` feature and
-attach the dedicated layer.
+If you want structured fields in the journal, or you're running outside a unit, enable
+the `journald` feature and add the dedicated layer alongside the stdout one:
 
 ```rust,ignore
 use tracing_subscriber::prelude::*;
@@ -88,20 +78,20 @@ use tracing_systemd::SystemdLayer;
 let journald = tracing_systemd::journald::layer_with_identifier("my-app").ok();
 
 tracing_subscriber::registry()
-    .with(SystemdLayer::stdout())   // pretty for humans
-    .with(journald)                 // structured fields into the journal
+    .with(SystemdLayer::stdout())
+    .with(journald)
     .init();
 ```
 
-`Option<Layer>` implements `Layer<S>`, so passing `None` (when journald isn't reachable)
-cleanly disables that arm without an `if let`.
+`Option<Layer>` implements `Layer<S>`, so a `None` (when journald isn't reachable)
+just becomes a no-op without an `if let`.
 
-Filter your entries with `journalctl -t my-app`.
+Filter entries with `journalctl -t my-app`.
 
 ## Customization
 
-Every separator and bracket is overridable via the builder; they accept anything that
-implements `Into<Cow<'static, str>>`, so `&'static str` *and* `String` both work.
+All separators, brackets, and prefixes are overridable on the builder. They take
+anything that's `Into<Cow<'static, str>>`, so both `&'static str` and `String` work.
 
 ```rust,ignore
 use tracing_systemd::{SystemdLayer, ColorMode, ColorTheme, TimestampFormat};
@@ -121,7 +111,7 @@ let layer = SystemdLayer::stdout()
     });
 ```
 
-For tests, write to any `io::Write`:
+For tests, redirect output to any `io::Write`:
 
 ```rust,ignore
 use std::sync::{Arc, Mutex};
@@ -132,15 +122,11 @@ let layer = SystemdLayer::stdout()
     .with_output(Output::writer(MyShared(buf.clone())));
 ```
 
-## Migration from 0.1
+## Migrating from 0.1
 
-The crate has 2,300+ downloads on 0.1 — here's the explicit method-name mapping.
-
-| 0.1 method                         | 0.2 equivalent                                        |
+| 0.1                                | 0.2                                                   |
 |------------------------------------|-------------------------------------------------------|
 | `SystemdLayer::new()`              | `SystemdLayer::stdout()`                              |
-| `with_target(b)`                   | `with_target(b)` *(unchanged)*                        |
-| `with_thread_ids(b)`               | `with_thread_ids(b)` *(unchanged)*                    |
 | `separate_spans_with(s)`           | `with_span_separator(s)`                              |
 | `separate_message_with(s)`         | `with_message_separator(s)`                           |
 | `level_separator(s)`               | `with_level_separator(s)`                             |
@@ -151,23 +137,25 @@ The crate has 2,300+ downloads on 0.1 — here's the explicit method-name mappin
 | `thread_id_prefix(s)`              | `with_thread_id_prefix(s)`                            |
 | `thread_id_suffix(s)`              | `with_thread_id_suffix(s)`                            |
 | `use_level_prefix(b)`              | `with_level_prefix(b)`                                |
-| `use_color(true)` / `use_color(false)` | `with_color_mode(ColorMode::Always / Never)`     |
-| `use_sd_journal(true)`             | Add `tracing_systemd::journald::layer()?` as a separate layer (requires `journald` feature). |
-| *(N/A)*                            | `with_timestamps`, `with_timestamp_format`, `with_color_theme`, `with_output` *(new)* |
+| `use_color(true/false)`            | `with_color_mode(ColorMode::Always / Never)`          |
+| `use_sd_journal(true)`             | Add `tracing_systemd::journald::layer()?` as a separate layer (needs `journald` feature). |
 
-**Other behavior changes:**
+`with_target` and `with_thread_ids` are unchanged. `with_timestamps`,
+`with_timestamp_format`, `with_color_theme`, and `with_output` are new.
 
-- The default for color output is now `ColorMode::Auto` (was: always on under the
-  `colored` feature). Pass `with_color_mode(ColorMode::Always)` for the old behavior.
-- `colored` feature renamed to `colors`.
-- `sd-journal` feature **removed**; use `journald` (which pulls in `tracing-journald` instead).
-- The old runtime `use_sd_journal(false)` toggle is gone — pick the right layer at
-  construction time.
+Other things that changed:
+
+- The default for color is now `ColorMode::Auto` (respects `NO_COLOR` and TTY status).
+  Pass `ColorMode::Always` for the old behavior.
+- The `colored` feature was renamed to `colors`.
+- The `sd-journal` feature is gone; use `journald`, which goes through
+  `tracing-journald` (pure Rust, no `libsystemd-dev`).
+- The runtime `use_sd_journal(false)` toggle is gone. Pick the layer at construction
+  time instead.
 
 ## MSRV
 
-Tracing-systemd 0.2 requires Rust **1.85** (edition 2024). Bumping the MSRV is a
-**minor** version bump going forward.
+Rust 1.85 (edition 2024). MSRV bumps are minor version bumps.
 
 ## License
 
