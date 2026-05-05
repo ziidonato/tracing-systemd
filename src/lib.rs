@@ -21,7 +21,7 @@
 //! |------------|---------|-------------------------------------------------------------------------|
 //! | `colors`   | yes     | Enables ANSI color output via [`nu-ansi-term`](https://docs.rs/nu-ansi-term). |
 //! | `journald` | no      | Re-exports the official [`tracing-journald`](https://docs.rs/tracing-journald) layer through [`mod@journald`]. Pure-Rust; no `libsystemd-dev` build dependency. |
-//! | `json`     | no      | Pulls in [`serde_json`](https://docs.rs/serde_json) (reserved for a future JSON output mode). |
+//! | `json`     | no      | Adds [`SystemdLayer::json`] for one JSON object per event (uses [`serde_json`](https://docs.rs/serde_json)). |
 //!
 //! # Migrating from 0.1
 //!

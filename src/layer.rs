@@ -18,6 +18,11 @@ use crate::visit::{FieldMap, FieldStorage, FieldVisitor};
 #[cfg(feature = "colors")]
 use crate::format::color::{ColorMode, ColorTheme};
 
+#[cfg(feature = "json")]
+use crate::format::RenderMode;
+#[cfg(feature = "json")]
+use crate::format::json::render_event_json;
+
 /// A `tracing-subscriber` Layer that emits a pretty span-chain line per event.
 ///
 /// Construct with [`SystemdLayer::stdout`], then chain `with_*` methods to
@@ -101,6 +106,55 @@ impl SystemdLayer {
         Self {
             config: FormatConfig {
                 use_level_prefix: true,
+                ..FormatConfig::default()
+            },
+            output: Output::stdout(),
+            #[cfg(feature = "colors")]
+            color_mode: ColorMode::Never,
+            #[cfg(feature = "colors")]
+            color_theme: ColorTheme::monochrome(),
+        }
+    }
+
+    /// Construct a layer that emits a single-line JSON object per event to
+    /// standard output.
+    ///
+    /// Defaults differ from the pretty-mode constructors: `target` is on,
+    /// timestamps are on with [`TimestampFormat::Rfc3339`], and the syslog
+    /// level prefix is off (so each line is a valid standalone JSON object).
+    /// Pretty-only builders (`with_color_*`, separators, brackets, thread-id
+    /// prefix/suffix) compile but have no effect in JSON mode.
+    ///
+    /// Schema (per line):
+    ///
+    /// ```json
+    /// {
+    ///   "timestamp": "2026-05-05T14:23:45.123Z",
+    ///   "level": "INFO",
+    ///   "message": "served request",
+    ///   "target": "my_app::handlers",
+    ///   "span_chain": [
+    ///     {"name": "request", "fields": {"method": "GET"}},
+    ///     {"name": "handler", "fields": {}}
+    ///   ],
+    ///   "fields": {"latency_ms": 4}
+    /// }
+    /// ```
+    ///
+    /// `thread_id` is added at the top level when [`Self::with_thread_ids`]
+    /// is `true`. Non-finite `f64` values become JSON `null`, matching
+    /// `tracing-subscriber`'s JSON formatter.
+    #[cfg(feature = "json")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "json")))]
+    #[must_use]
+    pub fn json() -> Self {
+        Self {
+            config: FormatConfig {
+                mode: RenderMode::Json,
+                show_target: true,
+                show_timestamp: true,
+                timestamp_format: TimestampFormat::Rfc3339,
+                use_level_prefix: false,
                 ..FormatConfig::default()
             },
             output: Output::stdout(),
@@ -309,20 +363,32 @@ where
             fields: &event_fields,
         };
 
-        // Pick a theme based on color mode + tty status.
-        #[cfg(feature = "colors")]
-        let line = {
-            let use_color = self.color_mode.resolve_now(self.output.is_terminal());
-            let theme = if use_color { Some(&self.color_theme) } else { None };
-            render_event(&self.config, &input, theme)
-        };
-        #[cfg(not(feature = "colors"))]
-        let line = render_event(&self.config, &input);
+        let line = self.render(&input);
 
         if self.config.use_level_prefix {
             self.output.write_line(&format!("{}{}", syslog_prefix(level), line));
         } else {
             self.output.write_line(&line);
+        }
+    }
+}
+
+impl SystemdLayer {
+    fn render(&self, input: &EventInput<'_>) -> String {
+        #[cfg(feature = "json")]
+        if matches!(self.config.mode, RenderMode::Json) {
+            return render_event_json(&self.config, input);
+        }
+
+        #[cfg(feature = "colors")]
+        {
+            let use_color = self.color_mode.resolve_now(self.output.is_terminal());
+            let theme = if use_color { Some(&self.color_theme) } else { None };
+            render_event(&self.config, input, theme)
+        }
+        #[cfg(not(feature = "colors"))]
+        {
+            render_event(&self.config, input)
         }
     }
 }

@@ -44,7 +44,7 @@ See `examples/` for more.
 |------------|---------|--------|
 | `colors`   | yes     | ANSI color output via [`nu-ansi-term`](https://docs.rs/nu-ansi-term). |
 | `journald` | no      | Re-exports [`tracing-journald`](https://docs.rs/tracing-journald) under `tracing_systemd::journald`. |
-| `json`     | no      | Pulls in [`serde_json`](https://docs.rs/serde_json) (reserved for a future JSON output mode). |
+| `json`     | no      | Adds `SystemdLayer::json()` for one JSON object per event (uses [`serde_json`](https://docs.rs/serde_json)). |
 
 To turn off color output:
 
@@ -87,6 +87,49 @@ tracing_subscriber::registry()
 just becomes a no-op without an `if let`.
 
 Filter entries with `journalctl -t my-app`.
+
+## JSON output
+
+Enable the `json` feature and use `SystemdLayer::json()` to emit one JSON object
+per event:
+
+```toml
+tracing-systemd = { version = "0.2", features = ["json"] }
+```
+
+```rust,ignore
+use tracing_subscriber::prelude::*;
+use tracing_systemd::SystemdLayer;
+
+tracing_subscriber::registry()
+    .with(SystemdLayer::json().with_thread_ids(true))
+    .init();
+```
+
+Sample line (formatted across lines for the README; in practice it's one line):
+
+```json
+{
+  "timestamp": "2026-05-05T14:23:45.123Z",
+  "level": "INFO",
+  "message": "served request",
+  "target": "my_app::handlers",
+  "span_chain": [
+    {"name": "request", "fields": {"method": "GET", "path": "/api"}},
+    {"name": "handler", "fields": {}}
+  ],
+  "fields": {"latency_ms": 4}
+}
+```
+
+Defaults differ from the pretty-mode constructors: `target` is on, timestamps
+default to RFC 3339 in UTC, and the `<3>`–`<7>` syslog prefix is off so each
+line is a valid standalone JSON object. Field types are preserved (`bool`,
+integer, float, string); non-finite floats (`NaN`, `±Infinity`) become `null`,
+matching `tracing-subscriber`'s JSON formatter and `JSON.stringify`.
+
+Pretty-only builders (`with_color_*`, separators, brackets, thread-id
+prefix/suffix) compile but have no effect in JSON mode.
 
 ## Customization
 

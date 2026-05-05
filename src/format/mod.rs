@@ -5,6 +5,8 @@ use std::borrow::Cow;
 #[cfg(feature = "colors")]
 pub(crate) mod color;
 pub(crate) mod event;
+#[cfg(feature = "json")]
+pub(crate) mod json;
 pub(crate) mod span_chain;
 
 #[cfg(feature = "colors")]
@@ -25,6 +27,23 @@ pub enum TimestampFormat {
     /// Seconds since this process started (e.g. `12.345`). Useful for tests
     /// and short-lived programs.
     Uptime,
+    /// RFC 3339 / ISO 8601 in UTC with millisecond precision and a trailing
+    /// `Z` (e.g. `2026-05-05T14:23:45.123Z`). Hand-formatted from
+    /// [`SystemTime`](std::time::SystemTime); no external date crate.
+    /// Default for [`SystemdLayer::json`](crate::SystemdLayer::json).
+    Rfc3339,
+}
+
+/// Which renderer the layer uses to turn an event into a line.
+///
+/// `Pretty` produces the human-readable span-chain form. `Json` produces a
+/// single-line JSON object per event (see [`SystemdLayer::json`](crate::SystemdLayer::json)).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum RenderMode {
+    #[default]
+    Pretty,
+    #[cfg(feature = "json")]
+    Json,
 }
 
 /// Static configuration shared by both the stdout and journald renderers.
@@ -34,6 +53,8 @@ pub enum TimestampFormat {
 #[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)] // Independent toggles, not state.
 pub(crate) struct FormatConfig {
+    #[cfg_attr(not(feature = "json"), allow(dead_code))]
+    pub mode: RenderMode,
     pub show_target: bool,
     pub show_thread_id: bool,
     pub show_timestamp: bool,
@@ -53,6 +74,7 @@ pub(crate) struct FormatConfig {
 impl Default for FormatConfig {
     fn default() -> Self {
         Self {
+            mode: RenderMode::Pretty,
             show_target: false,
             show_thread_id: false,
             show_timestamp: false,
@@ -112,7 +134,52 @@ pub(crate) fn format_timestamp(format: TimestampFormat) -> String {
             let elapsed = process_start().elapsed();
             format!("{}.{:03}", elapsed.as_secs(), elapsed.subsec_millis())
         }
+        TimestampFormat::Rfc3339 => format_rfc3339(SystemTime::now()),
     }
+}
+
+/// RFC 3339 / ISO 8601 in UTC with millisecond precision and a trailing `Z`.
+/// Hand-formatted from `SystemTime` using Howard Hinnant's date algorithm,
+/// so no external date crate is needed.
+fn format_rfc3339(now: std::time::SystemTime) -> String {
+    use std::time::UNIX_EPOCH;
+    let Ok(dur) = now.duration_since(UNIX_EPOCH) else {
+        return String::from("1970-01-01T00:00:00.000Z");
+    };
+    let total_secs = dur.as_secs();
+    let millis = dur.subsec_millis();
+    // Days since 1970-01-01 fit in i64 for any plausible system clock.
+    #[allow(clippy::cast_possible_wrap)]
+    let days = (total_secs / 86_400) as i64;
+    let sod = total_secs % 86_400;
+    let hour = sod / 3_600;
+    let minute = (sod % 3_600) / 60;
+    let second = sod % 60;
+    let (year, month, day) = civil_from_days(days);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
+}
+
+/// Howard Hinnant's `civil_from_days`:
+/// <https://howardhinnant.github.io/date_algorithms.html#civil_from_days>.
+/// Converts days-since-1970-01-01 into a `(year, month, day)` tuple in the
+/// proleptic Gregorian calendar.
+#[allow(
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::cast_possible_truncation
+)]
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+    (year, m as u32, d as u32)
 }
 
 fn process_start() -> std::time::Instant {
@@ -161,5 +228,37 @@ mod tests {
     fn format_timestamp_uptime_has_dot() {
         let s = format_timestamp(TimestampFormat::Uptime);
         assert!(s.contains('.'), "unexpected {s:?}");
+    }
+
+    #[test]
+    fn rfc3339_known_epochs() {
+        use std::time::{Duration, UNIX_EPOCH};
+        // Epoch
+        assert_eq!(
+            format_rfc3339(UNIX_EPOCH),
+            "1970-01-01T00:00:00.000Z"
+        );
+        // 2026-05-05T14:23:45.123Z
+        // 56 years × 365 + 14 leap days = 20454 days through 2025-12-31;
+        // + 124 days through 2026-05-05 = 20578 days.
+        // 20578 × 86400 + 14×3600 + 23×60 + 45 = 1_777_991_025 s.
+        let t = UNIX_EPOCH + Duration::new(1_777_991_025, 123_000_000);
+        assert_eq!(format_rfc3339(t), "2026-05-05T14:23:45.123Z");
+        // A leap year: 2000-02-29
+        // `date -u -d '2000-02-29T00:00:00Z' +%s` -> 951782400
+        let t = UNIX_EPOCH + Duration::new(951_782_400, 0);
+        assert_eq!(format_rfc3339(t), "2000-02-29T00:00:00.000Z");
+        // 1999-12-31T23:59:59.999Z
+        let t = UNIX_EPOCH + Duration::new(946_684_799, 999_000_000);
+        assert_eq!(format_rfc3339(t), "1999-12-31T23:59:59.999Z");
+    }
+
+    #[test]
+    fn format_timestamp_rfc3339_shape() {
+        let s = format_timestamp(TimestampFormat::Rfc3339);
+        // Shape: YYYY-MM-DDTHH:MM:SS.mmmZ → length 24, ends with Z, has 'T'.
+        assert_eq!(s.len(), 24, "got {s:?}");
+        assert!(s.ends_with('Z'), "got {s:?}");
+        assert!(s.contains('T'), "got {s:?}");
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "tracing-systemd"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -43,3 +43,7 @@ required-features = ["journald"]
 [[example]]
 name = "combined"
 required-features = ["journald"]
+
+[[example]]
+name = "json"
+required-features = ["json"]
