@@ -1,30 +1,41 @@
 [package]
-name = "tracing-systemd"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
-description = "A tracing subscriber that logs to the systemd journal"
-repository = "https://github.com/ziidonato/tracing-systemd"
-readme = "README.md"
-
-exclude = [".vscode"]
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
-sd-journal = { version = "0.1.0", optional = true }
-colored = { version = "2.1.0", optional = true }
-serde_json = "1.0.113"
-tracing = "0.1.40"
-tracing-subscriber = "0.3.18"
+name         = "tracing-systemd"
+version      = "0.2.0"
+edition      = "2024"
+rust-version = "1.85"
+license      = "MIT"
+description  = "A tracing-subscriber Layer that pretty-prints span chains to stdout and/or the systemd journal"
+repository   = "https://github.com/ziidonato/tracing-systemd"
+readme       = "README.md"
+keywords     = ["tracing", "systemd", "journald", "logging", "subscriber"]
+categories   = ["development-tools::debugging"]
+exclude      = [".vscode", ".claude"]
 
 [features]
-default = ["colored"]
+default  = ["colors"]
+colors   = ["dep:nu-ansi-term"]
+journald = ["dep:tracing-journald"]
+json     = ["dep:serde_json"]
+
+[dependencies]
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "registry", "fmt"] }
+nu-ansi-term       = { version = "0.50", optional = true }
+tracing-journald   = { version = "0.3",  optional = true }
+serde_json         = { version = "1",    optional = true }
+
+[package.metadata.docs.rs]
+all-features   = true
+rustdoc-args   = ["--cfg", "docsrs"]
+default-target = "x86_64-unknown-linux-gnu"
 
 [[example]]
-name = "test_log_stdout"
-required-features = ["colored"]
+name = "stdout"
 
 [[example]]
-name = "test_log_systemd"
-required-features = ["sd-journal", "colored"]
+name = "journald"
+required-features = ["journald"]
+
+[[example]]
+name = "combined"
+required-features = ["journald"]

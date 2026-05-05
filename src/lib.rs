@@ -1,65 +1,56 @@
-//! `tracing-subscriber` layer for logging to the systemd journal
+//! A [`tracing_subscriber::Layer`] that pretty-prints span chains to stdout
+//! and (optionally) the systemd journal.
 //!
-//! Provides a [`SystemdLayer`] implementation for use with `tracing-subscriber` that can be configured.
-//! Shows all spans and arguments.
+//! # Quick start
 //!
-//! # Features
-//! - `colored` (default): Enables colored output
-//! - `sd-journal`: Enables logging to the systemd journal (useful for running outside of a service)
-//!     - Requires `libsystemd-dev` to be installed
-//!     - Filter using `-t` | `--identifier` (e.g. `journalctl -t <identifier>`)
-//!
-//! # Example
-//! ```rust
-//! use tracing::error;
-//!
-//! use tracing::{debug, info, instrument, trace, warn};
+//! ```no_run
+//! use tracing::info;
 //! use tracing_subscriber::prelude::*;
 //! use tracing_systemd::SystemdLayer;
-//! fn main() {
-//!     tracing_subscriber::registry()
-//!         .with(
-//!             SystemdLayer::new()
-//!                 .with_target(true)
-//!                 .use_level_prefix(false)
-//!                 .use_color(true)
-//!                 .with_thread_ids(true),
-//!         )
-//!         .init();
 //!
-//!     root_log_fn(true);
-//! }
+//! tracing_subscriber::registry()
+//!     .with(SystemdLayer::stdout().with_target(true).with_thread_ids(true))
+//!     .init();
 //!
-//! #[instrument(fields(outside_instrument_field = true))]
-//! fn root_log_fn(outside_instrument_field: bool) {
-//!     info!("Root log");
-//!     inner_log_1(true);
-//! }
-//!
-//! #[instrument(fields(inside_instrument_field = true))]
-//! fn inner_log_1(inside_parameter_field: bool) {
-//!     trace!("this is a trace");
-//!     debug!(field_in_function = "also works");
-//!     info!("this is an info log");
-//!     warn!("Inner log 1");
-//!     error!("this is an error");
-//! }
+//! info!("hello");
 //! ```
+//!
+//! # Features
+//!
+//! | Feature    | Default | Effect                                                                  |
+//! |------------|---------|-------------------------------------------------------------------------|
+//! | `colors`   | yes     | Enables ANSI color output via [`nu-ansi-term`](https://docs.rs/nu-ansi-term). |
+//! | `journald` | no      | Re-exports the official [`tracing-journald`](https://docs.rs/tracing-journald) layer through [`mod@journald`]. Pure-Rust; no `libsystemd-dev` build dependency. |
+//! | `json`     | no      | Pulls in [`serde_json`](https://docs.rs/serde_json) (reserved for a future JSON output mode). |
+//!
+//! # Migrating from 0.1
+//!
+//! See [the README](https://github.com/ziidonato/tracing-systemd/blob/main/README.md#migration-from-01)
+//! for a method-by-method mapping.
 
-#![warn(missing_docs)]
+#![deny(missing_docs)]
+#![forbid(unsafe_code)]
+#![warn(
+    clippy::pedantic,
+    clippy::all,
+    rust_2018_idioms,
+    missing_debug_implementations
+)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
-mod formatting;
-mod systemd_layer;
+mod format;
+mod layer;
+mod output;
+mod visit;
 
-pub use systemd_layer::SystemdLayer;
+#[cfg(all(unix, feature = "journald"))]
+#[cfg_attr(docsrs, doc(cfg(all(unix, feature = "journald"))))]
+pub mod journald;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub use format::TimestampFormat;
+pub use layer::SystemdLayer;
+pub use output::Output;
 
-    #[test]
-    fn it_works() {
-        let result = 2 + 2;
-        assert_eq!(result, 4);
-    }
-}
+#[cfg(feature = "colors")]
+#[cfg_attr(docsrs, doc(cfg(feature = "colors")))]
+pub use format::{ColorMode, ColorTheme};
