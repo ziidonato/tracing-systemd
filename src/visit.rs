@@ -94,7 +94,10 @@ mod tests {
         assert_eq!(FieldValue::U64(7).to_string(), "7");
         assert_eq!(FieldValue::F64(1.5).to_string(), "1.5");
         assert_eq!(FieldValue::Str("hi".to_owned()).to_string(), "hi");
-        assert_eq!(FieldValue::Debug("Foo { x: 1 }".to_owned()).to_string(), "Foo { x: 1 }");
+        assert_eq!(
+            FieldValue::Debug("Foo { x: 1 }".to_owned()).to_string(),
+            "Foo { x: 1 }"
+        );
         assert_eq!(FieldValue::Error("oops".to_owned()).to_string(), "oops");
     }
 }

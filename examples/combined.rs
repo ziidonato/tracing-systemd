@@ -1,6 +1,5 @@
-//! Combined stdout + journald example. The pretty span-chain output goes
-//! to stdout for human reading; the journal receives structured events
-//! via `tracing-journald` so they are queryable with `journalctl`.
+//! Combined stdout + journald example: the same formatted lines go to the
+//! terminal and to the journal, so `journalctl` shows the span chain too.
 //!
 //! Run with: `cargo run --example combined --features journald`
 
@@ -9,16 +8,19 @@ use tracing_subscriber::prelude::*;
 use tracing_systemd::SystemdLayer;
 
 fn main() {
-    // Stdout layer: pretty for humans.
-    let stdout_layer = SystemdLayer::stdout()
-        .with_target(true)
-        .with_level_prefix(false);
+    // Optional: `None` when not running under systemd.
+    let journald_output = tracing_systemd::Output::journald()
+        .ok()
+        .map(|o| o.with_syslog_identifier("combined-example"));
 
-    // Journald layer: optional. None if we're not running under systemd.
-    let journald_layer = tracing_systemd::journald::layer_with_identifier("combined-example").ok();
+    let journald_layer = journald_output.map(|o| {
+        SystemdLayer::stdout()
+            .with_output(o)
+            .with_color_mode(tracing_systemd::ColorMode::Never)
+    });
 
     tracing_subscriber::registry()
-        .with(stdout_layer)
+        .with(SystemdLayer::stdout().with_target(true))
         .with(journald_layer)
         .init();
 
@@ -29,8 +31,8 @@ fn main() {
 fn work(seed: u64) {
     info!("starting work");
     if seed % 2 == 0 {
-        warn!(seed, "even seed — heuristic only");
+        warn!(seed, "even seed, heuristic only");
     } else {
-        error!(seed, "odd seed — would have failed");
+        error!(seed, "odd seed, would have failed");
     }
 }

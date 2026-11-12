@@ -10,15 +10,16 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 
 use crate::format::event::{EventInput, render_event};
+use crate::format::paint::Painter;
 use crate::format::span_chain::SpanLink;
+use crate::format::template::Template;
 use crate::format::{FormatConfig, TimestampFormat, syslog_prefix};
-use crate::output::Output;
+use crate::output::{EntryMeta, Output};
 use crate::visit::{FieldMap, FieldStorage, FieldVisitor};
 
 #[cfg(feature = "colors")]
 use crate::format::color::{ColorMode, ColorTheme};
 
-#[cfg(feature = "json")]
 use crate::format::RenderMode;
 #[cfg(feature = "json")]
 use crate::format::json::render_event_json;
@@ -48,7 +49,8 @@ pub struct SystemdLayer {
 impl fmt::Debug for SystemdLayer {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut d = f.debug_struct("SystemdLayer");
-        d.field("config", &self.config).field("output", &self.output);
+        d.field("config", &self.config)
+            .field("output", &self.output);
         #[cfg(feature = "colors")]
         d.field("color_mode", &self.color_mode)
             .field("color_theme", &self.color_theme);
@@ -94,13 +96,15 @@ impl SystemdLayer {
     }
 
     /// Construct a layer that writes formatted lines to a journald-friendly
-    /// stream — i.e. **stdout with syslog-priority prefixes** (`<3>`–`<7>`).
+    /// stream, i.e. **stdout with syslog-priority prefixes** (`<3>`–`<7>`).
     /// `journalctl` understands these prefixes when no native journal field
     /// is supplied, which is what happens for processes managed by a
     /// systemd unit (their stdout is already routed to the journal).
     ///
     /// For direct journal-protocol writes (without going through stdout),
-    /// enable the `journald` feature and use [`crate::journald::layer`].
+    /// enable the `journald` feature and use [`Output::journald`] with
+    /// [`Self::with_output`], and the journal then receives this same rendered
+    /// line plus native `PRIORITY`/`CODE_LINE`/`SPAN_NAME` fields.
     #[must_use]
     pub fn unit_stdout() -> Self {
         Self {
@@ -152,7 +156,6 @@ impl SystemdLayer {
             config: FormatConfig {
                 mode: RenderMode::Json,
                 show_target: true,
-                show_timestamp: true,
                 timestamp_format: TimestampFormat::Rfc3339,
                 use_level_prefix: false,
                 ..FormatConfig::default()
@@ -177,6 +180,34 @@ impl SystemdLayer {
         self
     }
 
+    /// Replace the whole line format with a template.
+    ///
+    /// The template is compiled here, so a brace error is a startup failure
+    /// rather than a broken log line. Placeholders name built-ins
+    /// (`level`, `level_short`, `target`, `message`, `thread_id`, `timestamp`,
+    /// `file`, `line`, `spans`, `leaf`, `span`, `fields`) or any event field;
+    /// a missing field renders empty. `{name:>5}` / `{name:<5}` / `{name:^5}`
+    /// pad to a width, ignoring ANSI escapes.
+    ///
+    /// Overrides [`Self::json`] and every `with_*` formatting option; colours
+    /// still apply per element.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TemplateError`](crate::TemplateError) if the braces do not
+    /// balance or an alignment spec is unrecognised.
+    ///
+    /// ```
+    /// # use tracing_systemd::SystemdLayer;
+    /// let layer = SystemdLayer::stdout()
+    ///     .template("{level:>5} {target}: {message}")
+    ///     .unwrap();
+    /// ```
+    pub fn template(mut self, src: impl Into<String>) -> Result<Self, crate::TemplateError> {
+        self.config.mode = RenderMode::Custom(Template::parse(src)?);
+        Ok(self)
+    }
+
     /// Show the event's `target` (typically the module path) before the span chain.
     /// Default: `false`.
     #[must_use]
@@ -192,28 +223,33 @@ impl SystemdLayer {
         self
     }
 
-    /// Show a timestamp at the start of each line. Default: `false`.
-    /// See also [`SystemdLayer::with_timestamp_format`].
+    /// Show a timestamp at the start of each line, in the default format
+    /// ([`TimestampFormat::Rfc3339`]). Default: `false`.
+    ///
+    /// Passing `false` restores [`TimestampFormat::None`], so this and
+    /// [`Self::with_timestamp_format`] set the same knob and the last call wins.
     #[must_use]
     pub fn with_timestamps(mut self, show: bool) -> Self {
-        self.config.show_timestamp = show;
+        if show && self.config.timestamp_format == TimestampFormat::None {
+            self.config.timestamp_format = TimestampFormat::Rfc3339;
+        } else if !show {
+            self.config.timestamp_format = TimestampFormat::None;
+        }
         self
     }
 
-    /// Choose the timestamp format. Implies `with_timestamps(true)` for any
-    /// non-`None` value. Default: [`TimestampFormat::None`].
+    /// Choose the timestamp format. [`TimestampFormat::None`] turns timestamps
+    /// off. Default: [`TimestampFormat::None`].
     #[must_use]
     pub fn with_timestamp_format(mut self, format: TimestampFormat) -> Self {
         self.config.timestamp_format = format;
-        if format != TimestampFormat::None {
-            self.config.show_timestamp = true;
-        }
         self
     }
 
     /// Emit a syslog-priority prefix (`<3>` – `<7>`) before each line. This
     /// is what `journalctl` uses to assign a `PRIORITY` when ingesting plain
-    /// stdout from a systemd unit. Default: `true`.
+    /// stdout from a systemd unit. Default: `false`; [`Self::unit_stdout`]
+    /// turns it on.
     #[must_use]
     pub fn with_level_prefix(mut self, use_prefix: bool) -> Self {
         self.config.use_level_prefix = use_prefix;
@@ -252,6 +288,20 @@ impl SystemdLayer {
     #[must_use]
     pub fn with_function_bracket_right(mut self, s: impl Into<Cow<'static, str>>) -> Self {
         self.config.function_bracket_right = s.into();
+        self
+    }
+
+    /// String opening the event's field tail (`{`). Default: `"{"`.
+    #[must_use]
+    pub fn with_field_bracket_left(mut self, s: impl Into<Cow<'static, str>>) -> Self {
+        self.config.field_bracket_left = s.into();
+        self
+    }
+
+    /// String closing the event's field tail (`}`). Default: `"}"`.
+    #[must_use]
+    pub fn with_field_bracket_right(mut self, s: impl Into<Cow<'static, str>>) -> Self {
+        self.config.field_bracket_right = s.into();
         self
     }
 
@@ -323,6 +373,29 @@ where
         }
     }
 
+    /// Span fields can be filled in after the span is created, by
+    /// `span.record(..)`, `#[instrument]` on late parameters, or a
+    /// `tracing::field::Empty` placeholder. Without this hook those values
+    /// would be silently missing from every line that prints the span.
+    fn on_record(
+        &self,
+        id: &tracing::span::Id,
+        values: &tracing::span::Record<'_>,
+        ctx: Context<'_, S>,
+    ) {
+        let Some(span) = ctx.span(id) else { return };
+        let mut exts = span.extensions_mut();
+        // Move the map out, record into it, then put it back: the extension
+        // borrows `exts` for as long as the visitor runs.
+        let mut fields = exts
+            .get_mut::<FieldStorage>()
+            .map_or_else(FieldMap::new, |s| std::mem::take(&mut s.0));
+        values.record(&mut FieldVisitor::new(&mut fields));
+        // `insert` panics when the extension is already there, which it always
+        // is once `on_new_span` ran; `replace` overwrites instead.
+        exts.replace(FieldStorage(fields));
+    }
+
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         // Walk parent spans and copy their fields out.
         // The leaf span (if any) is the *last* element; everything before
@@ -358,6 +431,8 @@ where
         let input = EventInput {
             level,
             target: metadata.target(),
+            file: metadata.file().unwrap_or(""),
+            line: metadata.line().unwrap_or(0),
             parents,
             leaf: leaf.as_ref(),
             fields: &event_fields,
@@ -365,31 +440,54 @@ where
 
         let line = self.render(&input);
 
-        if self.config.use_level_prefix {
-            self.output.write_line(&format!("{}{}", syslog_prefix(level), line));
+        // The journal gets the rendered line verbatim; metadata rides alongside
+        // as native fields instead of being pasted into `MESSAGE`.
+        let span_names: Vec<&'static str> = chain.iter().map(|s| s.name).collect();
+        let meta = EntryMeta {
+            level,
+            target: metadata.target(),
+            file: metadata.file().unwrap_or(""),
+            line: metadata.line().unwrap_or(0),
+            spans: &span_names,
+        };
+
+        // A journald sink stamps its own PRIORITY, so a `<5>` text prefix would
+        // be duplicated data inside `MESSAGE`; only plain text sinks want it.
+        let prefix = self.config.use_level_prefix && !self.output.is_journald();
+        let line = if prefix {
+            format!("{}{}", syslog_prefix(level), line)
         } else {
-            self.output.write_line(&line);
-        }
+            line
+        };
+        self.output.write_line(&line, &meta);
     }
 }
 
 impl SystemdLayer {
+    #[cfg_attr(not(feature = "colors"), allow(clippy::unused_self))]
+    fn painter(&self) -> Painter<'_> {
+        #[cfg(feature = "colors")]
+        {
+            if self.color_mode.resolve_now(self.output.is_terminal()) {
+                return Painter::themed(&self.color_theme);
+            }
+        }
+        Painter::mono()
+    }
+
     fn render(&self, input: &EventInput<'_>) -> String {
         #[cfg(feature = "json")]
         if matches!(self.config.mode, RenderMode::Json) {
             return render_event_json(&self.config, input);
         }
 
-        #[cfg(feature = "colors")]
-        {
-            let use_color = self.color_mode.resolve_now(self.output.is_terminal());
-            let theme = if use_color { Some(&self.color_theme) } else { None };
-            render_event(&self.config, input, theme)
+        let painter = self.painter();
+
+        if let RenderMode::Custom(template) = &self.config.mode {
+            return template.render(&self.config, input, painter);
         }
-        #[cfg(not(feature = "colors"))]
-        {
-            render_event(&self.config, input)
-        }
+
+        render_event(&self.config, input, painter)
     }
 }
 
@@ -444,6 +542,39 @@ mod tests {
         });
         assert!(out.contains("worker(id: 7)"), "got {out:?}");
         assert!(out.contains("done"), "got {out:?}");
+    }
+
+    #[test]
+    fn recorded_span_fields_appear_in_output() {
+        let layer = SystemdLayer::stdout();
+        let out = capture(layer, || {
+            let span = info_span!("worker", late = tracing::field::Empty);
+            let _g = span.enter();
+            span.record("late", 42u64);
+            info!("done");
+        });
+        assert!(out.contains("worker(late: 42)"), "got {out:?}");
+    }
+
+    #[test]
+    fn defaults_have_no_syslog_prefix_and_no_timestamp() {
+        let out = capture(SystemdLayer::stdout(), || info!("plain"));
+        assert!(out.starts_with("INFO "), "got {out:?}");
+    }
+
+    #[test]
+    fn unit_stdout_has_syslog_prefix() {
+        let out = capture(SystemdLayer::unit_stdout(), || info!("u"));
+        assert!(out.starts_with("<5>INFO"), "got {out:?}");
+    }
+
+    #[test]
+    fn with_timestamps_false_clears_the_format() {
+        let layer = SystemdLayer::stdout()
+            .with_timestamp_format(TimestampFormat::UnixSeconds)
+            .with_timestamps(false);
+        let out = capture(layer, || info!("x"));
+        assert!(out.starts_with("INFO "), "got {out:?}");
     }
 
     #[test]

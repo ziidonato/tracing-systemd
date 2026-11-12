@@ -15,17 +15,34 @@
 //! info!("hello");
 //! ```
 //!
+//! To control the line shape exactly, pass a template instead of tuning
+//! separators:
+//!
+//! ```no_run
+//! use tracing_subscriber::prelude::*;
+//! use tracing_systemd::SystemdLayer;
+//!
+//! // INFO app::net: served took_ms=4
+//! tracing_subscriber::registry()
+//!     .with(
+//!         SystemdLayer::stdout()
+//!             .template("{level} {target}: {message} took_ms={took_ms}")
+//!             .expect("template"),
+//!     )
+//!     .init();
+//! ```
+//!
 //! # Features
 //!
 //! | Feature    | Default | Effect                                                                  |
 //! |------------|---------|-------------------------------------------------------------------------|
 //! | `colors`   | yes     | Enables ANSI color output via [`nu-ansi-term`](https://docs.rs/nu-ansi-term). |
-//! | `journald` | no      | Re-exports the official [`tracing-journald`](https://docs.rs/tracing-journald) layer through [`mod@journald`]. Pure-Rust; no `libsystemd-dev` build dependency. |
+//! | `journald` | no      | Adds [`Output::journald`], which writes the *same* formatted line to the journal socket. Pure Rust; no `libsystemd-dev`. |
 //! | `json`     | no      | Adds [`SystemdLayer::json`] for one JSON object per event (uses [`serde_json`](https://docs.rs/serde_json)). |
 //!
 //! # Migrating from 0.1
 //!
-//! See [the README](https://github.com/ziidonato/tracing-systemd/blob/main/README.md#migration-from-01)
+//! See [the README](https://github.com/ziidonato/tracing-systemd/blob/main/README.md#migrating-from-01)
 //! for a method-by-method mapping.
 
 #![deny(missing_docs)]
@@ -44,8 +61,7 @@ mod output;
 mod visit;
 
 #[cfg(all(unix, feature = "journald"))]
-#[cfg_attr(docsrs, doc(cfg(all(unix, feature = "journald"))))]
-pub mod journald;
+pub(crate) mod journald;
 
 pub use format::TimestampFormat;
 pub use layer::SystemdLayer;
@@ -54,3 +70,5 @@ pub use output::Output;
 #[cfg(feature = "colors")]
 #[cfg_attr(docsrs, doc(cfg(feature = "colors")))]
 pub use format::{ColorMode, ColorTheme};
+
+pub use format::Error as TemplateError;

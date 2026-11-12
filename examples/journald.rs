@@ -3,19 +3,25 @@
 //! Run with: `cargo run --example journald --features journald`
 //! Then watch the journal: `journalctl -t journald-example -f`
 //!
-//! Replaces 0.1's `test_log_systemd`. Note that under a real systemd unit
-//! you usually don't need this — stdout from the unit is already routed
-//! to the journal — but this example shows direct emission for processes
-//! running outside a unit.
+//! Replaces 0.1's `test_log_systemd`. Under a real systemd unit you usually
+//! don't need this (the unit's stdout is already routed to the journal), but
+//! this shows direct emission for processes running outside a unit.
+//!
+//! The journal receives the *same rendered line* stdout would, plus native
+//! `PRIORITY`/`CODE_LINE`/`SPAN_NAME` fields, so `journalctl` shows a readable
+//! log rather than a bare message.
 
 use tracing::{debug, error, info, instrument, trace, warn};
 use tracing_subscriber::prelude::*;
 
 fn main() {
-    let journald = tracing_systemd::journald::layer_with_identifier("journald-example")
-        .expect("failed to connect to /run/systemd/journal/socket — are you on systemd?");
+    let output = tracing_systemd::Output::journald()
+        .expect("failed to connect to /run/systemd/journal/socket; are you on systemd?")
+        .with_syslog_identifier("journald-example");
 
-    tracing_subscriber::registry().with(journald).init();
+    tracing_subscriber::registry()
+        .with(tracing_systemd::SystemdLayer::stdout().with_output(output))
+        .init();
 
     root_log_fn(true);
 }

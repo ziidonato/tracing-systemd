@@ -1,6 +1,6 @@
 //! Integration tests against the public crate surface only.
 //!
-//! These tests intentionally do not use any `pub(crate)` item — they
+//! These tests intentionally do not use any `pub(crate)` item; they
 //! verify that the API documented in the README is enough to drive the
 //! layer through realistic scenarios.
 
@@ -108,7 +108,7 @@ fn custom_brackets_and_arg_format_round_trip() {
         let _g = span.enter();
         info!("hi");
     });
-    assert!(out.contains("worker[id=1,name=alice]"), "got: {out}");
+    assert!(out.contains(r#"worker[id=1,name="alice"]"#), "got: {out}");
 }
 
 #[test]
@@ -134,9 +134,7 @@ mod json {
         let bytes = captured.lock().unwrap().clone();
         let s = String::from_utf8(bytes).expect("utf-8");
         s.lines()
-            .map(|l| {
-                serde_json::from_str(l).unwrap_or_else(|e| panic!("bad json: {l:?}: {e}"))
-            })
+            .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("bad json: {l:?}: {e}")))
             .collect()
     }
 
@@ -224,10 +222,9 @@ mod json {
         let layer = SystemdLayer::json()
             .with_level_prefix(true)
             .with_output(Output::writer(buf));
-        tracing::subscriber::with_default(
-            tracing_subscriber::registry().with(layer),
-            || warn!("p"),
-        );
+        tracing::subscriber::with_default(tracing_subscriber::registry().with(layer), || {
+            warn!("p")
+        });
         let s = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
         assert!(s.starts_with("<4>"), "got {s:?}");
         // Strip the prefix and parse the remainder as JSON.
@@ -239,14 +236,7 @@ mod json {
     #[test]
     fn field_types_preserved_round_trip() {
         let lines = capture_json(SystemdLayer::json(), || {
-            let span = info_span!(
-                "s",
-                b = true,
-                i = -3i64,
-                u = 42u64,
-                f = 1.5f64,
-                s = "hi",
-            );
+            let span = info_span!("s", b = true, i = -3i64, u = 42u64, f = 1.5f64, s = "hi",);
             let _g = span.enter();
             info!(extra = 9u64, "msg");
         });
@@ -267,5 +257,47 @@ mod json {
         });
         assert!(lines[0]["fields"]["bad"].is_null());
     }
+}
 
+#[test]
+fn template_controls_the_whole_line() {
+    let layer = SystemdLayer::stdout()
+        .template("{level:>5} {target}: {message} {fields}")
+        .expect("template");
+    let out = capture(layer, || {
+        info!(rows = 3u64, "done");
+    });
+    assert_eq!(out.trim_end(), " INFO integration: done rows: 3");
+}
+
+#[test]
+fn template_can_drop_the_span_chain() {
+    let layer = SystemdLayer::stdout()
+        .template("{level_short} {message}")
+        .expect("template");
+    let out = capture(layer, || {
+        let span = info_span!("noisy", id = 7u64);
+        let _g = span.enter();
+        warn!("careful");
+    });
+    assert_eq!(out.trim_end(), "WRN careful");
+}
+
+#[test]
+fn template_can_promote_a_span_field() {
+    let layer = SystemdLayer::stdout()
+        .template("{message} span={leaf}")
+        .expect("template");
+    let out = capture(layer, || {
+        let span = info_span!("handler");
+        let _g = span.enter();
+        info!("hi");
+    });
+    assert_eq!(out.trim_end(), "hi span=handler");
+}
+
+#[test]
+fn bad_template_fails_at_construction() {
+    let err = SystemdLayer::stdout().template("{unclosed").unwrap_err();
+    assert!(err.to_string().contains("unclosed"), "got: {err}");
 }

@@ -1,135 +1,90 @@
 //! Render a complete event line: `[ts] LEVEL [tid] target::span(arg=val)::leaf(): message {fields}`.
 
-use std::fmt::Write as _;
-
+use crate::format::paint::Painter;
 use crate::format::span_chain::{SpanLink, render_chain, render_span_name};
 use crate::format::{FormatConfig, TimestampFormat, current_thread_id_int, format_timestamp};
-use crate::visit::{FieldMap, FieldValue};
-
-#[cfg(feature = "colors")]
-use crate::format::color::ColorTheme;
+use crate::visit::FieldMap;
 
 /// Inputs to event rendering. Bundled into a struct to keep the function
 /// signature manageable.
 pub(crate) struct EventInput<'a> {
     pub level: tracing::Level,
     pub target: &'a str,
+    /// `file!()` of the event's call site, or `""` when not recorded.
+    pub file: &'a str,
+    /// Line of the event's call site, or `0` when not recorded.
+    pub line: u32,
     pub parents: &'a [SpanLink],
     /// The leaf span, if any (the most recent span enclosing the event).
     pub leaf: Option<&'a SpanLink>,
     pub fields: &'a FieldMap,
 }
 
-/// Render the line, with optional ANSI styling. Pass `theme = None` for
-/// no styling regardless of feature.
-#[allow(clippy::too_many_arguments)]
+/// Render the line. Styling comes from `painter`; pass [`Painter::mono`] for
+/// plain text.
 pub(crate) fn render_event(
     cfg: &FormatConfig,
     input: &EventInput<'_>,
-    #[cfg(feature = "colors")] theme: Option<&ColorTheme>,
+    painter: Painter<'_>,
 ) -> String {
     let mut out = String::with_capacity(64);
 
-    // 1. Optional timestamp prefix.
-    if cfg.show_timestamp && cfg.timestamp_format != TimestampFormat::None {
+    if cfg.timestamp_format != TimestampFormat::None {
         out.push_str(&format_timestamp(cfg.timestamp_format));
-        out.push(' ');
+        out.push_str(&cfg.level_separator);
     }
 
-    // 2. Level (styled or plain).
-    let level_str = input.level.as_str();
-    #[cfg(feature = "colors")]
-    {
-        if let Some(t) = theme {
-            let _ = write!(out, "{}", t.level_style(input.level).paint(level_str));
-        } else {
-            out.push_str(level_str);
-        }
-    }
-    #[cfg(not(feature = "colors"))]
-    {
-        out.push_str(level_str);
-    }
-
+    painter.write_level(&mut out, input.level);
     out.push_str(&cfg.level_separator);
 
-    // 3. Optional thread id.
     if cfg.show_thread_id {
         let tid = current_thread_id_int();
         out.push_str(&cfg.thread_id_prefix);
-        #[cfg(feature = "colors")]
-        {
-            if let Some(t) = theme {
-                let _ = write!(out, "{}", t.thread_id.paint(&tid));
-            } else {
-                out.push_str(&tid);
-            }
-        }
-        #[cfg(not(feature = "colors"))]
-        {
-            out.push_str(&tid);
-        }
+        painter.write_thread_id(&mut out, &tid);
         out.push_str(&cfg.thread_id_suffix);
     }
 
-    // 4. Span chain (parents) + leaf span name.
-    let chain = render_chain(cfg, input.target, input.parents);
-    out.push_str(&chain);
+    out.push_str(&render_chain(cfg, painter, input.target, input.parents));
 
     if let Some(leaf) = input.leaf {
-        out.push_str(&render_span_name(cfg, leaf));
+        out.push_str(&render_span_name(cfg, painter, leaf));
     }
 
-    // 5. Message + non-message fields.
-    let message = input.fields.get("message");
-    let other_fields_count = input.fields.iter().filter(|(k, _)| **k != "message").count();
-
-    if let Some(msg) = message {
+    if let Some(msg) = input.fields.get("message") {
         out.push_str(&cfg.message_separator);
         out.push_str(&msg.to_string());
     }
 
-    if other_fields_count > 0 {
+    // Peeking first keeps the bracket, and the separator before it, absent
+    // when the event carries no fields beyond the message.
+    let mut others = input
+        .fields
+        .iter()
+        .filter(|(k, _)| **k != "message")
+        .peekable();
+    if others.peek().is_some() {
         out.push_str(&cfg.message_separator);
-        out.push('{');
+        out.push_str(&cfg.field_bracket_left);
         let mut first = true;
-        for (name, value) in input.fields.iter().filter(|(k, _)| **k != "message") {
+        for (name, value) in others {
             if !first {
-                out.push_str(", ");
+                out.push_str(&cfg.arguments_separator);
             }
             first = false;
-            let _ = write!(out, "{name}: ");
-            render_field_value(&mut out, value);
+            painter.write_field_name(&mut out, name);
+            out.push_str(&cfg.arguments_equality);
+            painter.write_field_value(&mut out, value);
         }
-        out.push('}');
+        out.push_str(&cfg.field_bracket_right);
     }
 
     out
 }
 
-fn render_field_value(out: &mut String, v: &FieldValue) {
-    match v {
-        FieldValue::Str(s) | FieldValue::Debug(s) | FieldValue::Error(s) => {
-            // Quote string-like values for readability and to disambiguate
-            // when a field contains separator characters like `, ` or `}`.
-            out.push('"');
-            for ch in s.chars() {
-                if ch == '"' || ch == '\\' {
-                    out.push('\\');
-                }
-                out.push(ch);
-            }
-            out.push('"');
-        }
-        other => {
-            let _ = write!(out, "{other}");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::visit::FieldValue;
     use std::collections::BTreeMap;
 
     fn map(kvs: &[(&'static str, FieldValue)]) -> FieldMap {
@@ -148,10 +103,7 @@ mod tests {
     }
 
     fn render_plain(cfg: &FormatConfig, input: &EventInput<'_>) -> String {
-        #[cfg(feature = "colors")]
-        return render_event(cfg, input, None);
-        #[cfg(not(feature = "colors"))]
-        return render_event(cfg, input);
+        render_event(cfg, input, Painter::mono())
     }
 
     #[test]
@@ -161,6 +113,8 @@ mod tests {
         let input = EventInput {
             level: tracing::Level::INFO,
             target: "t",
+            file: "src/f.rs",
+            line: 7,
             parents: &[],
             leaf: None,
             fields: &fields,
@@ -177,11 +131,16 @@ mod tests {
         let input = EventInput {
             level: tracing::Level::WARN,
             target: "t",
+            file: "src/f.rs",
+            line: 7,
             parents: &parents,
             leaf: Some(&leaf),
             fields: &fields,
         };
-        assert_eq!(render_plain(&cfg, &input), "WARN outer()::inner(flag: true): hi");
+        assert_eq!(
+            render_plain(&cfg, &input),
+            "WARN outer()::inner(flag: true): hi"
+        );
     }
 
     #[test]
@@ -195,6 +154,8 @@ mod tests {
         let input = EventInput {
             level: tracing::Level::INFO,
             target: "t",
+            file: "src/f.rs",
+            line: 7,
             parents: &[],
             leaf: None,
             fields: &fields,
@@ -207,12 +168,40 @@ mod tests {
     }
 
     #[test]
+    fn event_fields_honour_arguments_separators() {
+        let cfg = FormatConfig {
+            field_bracket_left: "[".into(),
+            field_bracket_right: "]".into(),
+            arguments_equality: "=".into(),
+            arguments_separator: ",".into(),
+            ..FormatConfig::default()
+        };
+        let fields = map(&[
+            ("message", FieldValue::Str("m".into())),
+            ("a", FieldValue::U64(1)),
+            ("b", FieldValue::U64(2)),
+        ]);
+        let input = EventInput {
+            level: tracing::Level::INFO,
+            target: "t",
+            file: "src/f.rs",
+            line: 7,
+            parents: &[],
+            leaf: None,
+            fields: &fields,
+        };
+        assert_eq!(render_plain(&cfg, &input), "INFO : m: [a=1,b=2]");
+    }
+
+    #[test]
     fn no_message_only_fields() {
         let cfg = FormatConfig::default();
         let fields = map(&[("k", FieldValue::I64(-1))]);
         let input = EventInput {
             level: tracing::Level::DEBUG,
             target: "t",
+            file: "src/f.rs",
+            line: 7,
             parents: &[],
             leaf: None,
             fields: &fields,
@@ -231,6 +220,8 @@ mod tests {
         let input = EventInput {
             level: tracing::Level::INFO,
             target: "my::tgt",
+            file: "src/f.rs",
+            line: 7,
             parents: &[],
             leaf: Some(&leaf),
             fields: &fields,
@@ -245,10 +236,34 @@ mod tests {
         let input = EventInput {
             level: tracing::Level::INFO,
             target: "t",
+            file: "src/f.rs",
+            line: 7,
             parents: &[],
             leaf: None,
             fields: &fields,
         };
         assert_eq!(render_plain(&cfg, &input), r#"INFO : {v: "a\"b\\c"}"#);
+    }
+
+    #[test]
+    fn timestamp_uses_level_separator() {
+        let cfg = FormatConfig {
+            timestamp_format: TimestampFormat::Uptime,
+            ..FormatConfig::default()
+        };
+        let fields = map(&[("message", FieldValue::Str("hi".into()))]);
+        let input = EventInput {
+            level: tracing::Level::INFO,
+            target: "t",
+            file: "src/f.rs",
+            line: 7,
+            parents: &[],
+            leaf: None,
+            fields: &fields,
+        };
+        let out = render_plain(&cfg, &input);
+        let ts = out.split("INFO").next().unwrap();
+        assert!(ts.contains('.'), "got {out:?}");
+        assert!(ts.ends_with(' '), "got {out:?}");
     }
 }

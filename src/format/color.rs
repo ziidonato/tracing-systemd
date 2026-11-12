@@ -149,6 +149,51 @@ mod tests {
     }
 
     #[test]
+    fn theme_fields_reach_the_renderer() {
+        use crate::format::FormatConfig;
+        use crate::format::event::{EventInput, render_event};
+        use crate::format::paint::Painter;
+        use crate::visit::FieldValue;
+        use std::collections::BTreeMap;
+
+        let theme = ColorTheme {
+            span_name: Style::new().fg(Color::Cyan),
+            field_name: Style::new().fg(Color::Magenta),
+            field_value: Style::new().fg(Color::Blue),
+            target: Style::new().fg(Color::Yellow),
+            ..ColorTheme::monochrome()
+        };
+        let mut fields = BTreeMap::new();
+        fields.insert("message", FieldValue::Str("hi".into()));
+        fields.insert("k", FieldValue::U64(1));
+        let mut span_fields = BTreeMap::new();
+        span_fields.insert("a", FieldValue::U64(2));
+        let leaf = crate::format::span_chain::SpanLink {
+            name: "leaf",
+            fields: span_fields,
+        };
+        let cfg = FormatConfig {
+            show_target: true,
+            ..FormatConfig::default()
+        };
+        let input = EventInput {
+            level: tracing::Level::INFO,
+            target: "tgt",
+            file: "src/f.rs",
+            line: 7,
+            parents: &[],
+            leaf: Some(&leaf),
+            fields: &fields,
+        };
+        let out = render_event(&cfg, &input, Painter::themed(&theme));
+        // Each styled fragment must carry an ANSI escape.
+        assert!(out.contains("36mleaf"), "span_name unstyled: {out:?}");
+        assert!(out.contains("33mtgt"), "target unstyled: {out:?}");
+        assert!(out.contains("35ma"), "field_name unstyled: {out:?}");
+        assert!(out.contains("34m"), "field_value unstyled: {out:?}");
+    }
+
+    #[test]
     fn monochrome_has_empty_styles() {
         let theme = ColorTheme::monochrome();
         let plain = Style::new();

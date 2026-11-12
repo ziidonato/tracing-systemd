@@ -3,7 +3,7 @@
 //! Schema:
 //! ```text
 //! {
-//!   "timestamp": "<rfc3339 or unix>",   // omitted if show_timestamp is false
+//!   "timestamp": "<rfc3339 or unix>",   // omitted when timestamp_format is None
 //!   "level":     "INFO" | ...,
 //!   "message":   "<the event's message field, or "" if none>",
 //!   "target":    "<module path>",       // omitted if show_target is false
@@ -23,7 +23,7 @@ use crate::visit::FieldValue;
 pub(crate) fn render_event_json(cfg: &FormatConfig, input: &EventInput<'_>) -> String {
     let mut obj = Map::new();
 
-    if cfg.show_timestamp && cfg.timestamp_format != TimestampFormat::None {
+    if cfg.timestamp_format != TimestampFormat::None {
         obj.insert(
             "timestamp".into(),
             Value::String(format_timestamp(cfg.timestamp_format)),
@@ -54,7 +54,8 @@ pub(crate) fn render_event_json(cfg: &FormatConfig, input: &EventInput<'_>) -> S
         obj.insert("thread_id".into(), v);
     }
 
-    let mut chain: Vec<Value> = Vec::with_capacity(input.parents.len() + usize::from(input.leaf.is_some()));
+    let mut chain: Vec<Value> =
+        Vec::with_capacity(input.parents.len() + usize::from(input.leaf.is_some()));
     for link in input.parents {
         chain.push(span_link_to_json(link));
     }
@@ -126,7 +127,6 @@ mod tests {
         FormatConfig {
             mode: RenderMode::Json,
             show_target: true,
-            show_timestamp: false, // off in tests so output is deterministic
             timestamp_format: TimestampFormat::None,
             use_level_prefix: false,
             ..FormatConfig::default()
@@ -140,6 +140,8 @@ mod tests {
         let input = EventInput {
             level: tracing::Level::INFO,
             target: "my::tgt",
+            file: "src/f.rs",
+            line: 7,
             parents: &[],
             leaf: None,
             fields: &fields,
@@ -166,6 +168,8 @@ mod tests {
         let input = EventInput {
             level: tracing::Level::WARN,
             target: "t",
+            file: "src/f.rs",
+            line: 7,
             parents: &parents,
             leaf: Some(&leaf),
             fields: &fields,
@@ -196,6 +200,8 @@ mod tests {
         let input = EventInput {
             level: tracing::Level::INFO,
             target: "t",
+            file: "src/f.rs",
+            line: 7,
             parents: &[],
             leaf: None,
             fields: &fields,
@@ -222,6 +228,8 @@ mod tests {
         let input = EventInput {
             level: tracing::Level::INFO,
             target: "t",
+            file: "src/f.rs",
+            line: 7,
             parents: &[],
             leaf: None,
             fields: &fields,
@@ -242,6 +250,8 @@ mod tests {
         let input = EventInput {
             level: tracing::Level::INFO,
             target: "t",
+            file: "src/f.rs",
+            line: 7,
             parents: &[],
             leaf: None,
             fields: &fields,
@@ -260,6 +270,8 @@ mod tests {
         let input = EventInput {
             level: tracing::Level::INFO,
             target: "t",
+            file: "src/f.rs",
+            line: 7,
             parents: &[],
             leaf: None,
             fields: &fields,
@@ -275,6 +287,8 @@ mod tests {
         let input = EventInput {
             level: tracing::Level::INFO,
             target: "t",
+            file: "src/f.rs",
+            line: 7,
             parents: &[],
             leaf: None,
             fields: &fields,

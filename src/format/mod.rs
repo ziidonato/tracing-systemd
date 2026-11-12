@@ -7,10 +7,14 @@ pub(crate) mod color;
 pub(crate) mod event;
 #[cfg(feature = "json")]
 pub(crate) mod json;
+pub(crate) mod paint;
 pub(crate) mod span_chain;
+pub(crate) mod template;
 
 #[cfg(feature = "colors")]
 pub use color::{ColorMode, ColorTheme};
+
+pub use template::TemplateError as Error;
 
 /// How (or whether) to render a timestamp at the start of each stdout line.
 ///
@@ -38,17 +42,19 @@ pub enum TimestampFormat {
 ///
 /// `Pretty` produces the human-readable span-chain form. `Json` produces a
 /// single-line JSON object per event (see [`SystemdLayer::json`](crate::SystemdLayer::json)).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// `Custom` renders a user template (see [`SystemdLayer::template`](crate::SystemdLayer::template)).
+#[derive(Debug, Clone, Default)]
 pub(crate) enum RenderMode {
     #[default]
     Pretty,
     #[cfg(feature = "json")]
     Json,
+    Custom(crate::format::template::Template),
 }
 
 /// Static configuration shared by both the stdout and journald renderers.
 ///
-/// Held by `SystemdLayer` and not exposed publicly — users configure via
+/// Held by `SystemdLayer` and not exposed publicly; users configure via
 /// builder methods on [`SystemdLayer`](crate::SystemdLayer) instead.
 #[derive(Debug, Clone)]
 #[allow(clippy::struct_excessive_bools)] // Independent toggles, not state.
@@ -57,7 +63,7 @@ pub(crate) struct FormatConfig {
     pub mode: RenderMode,
     pub show_target: bool,
     pub show_thread_id: bool,
-    pub show_timestamp: bool,
+    /// `TimestampFormat::None` means "no timestamp"; there is no separate bool.
     pub timestamp_format: TimestampFormat,
     pub use_level_prefix: bool,
     pub span_separator: Cow<'static, str>,
@@ -65,6 +71,10 @@ pub(crate) struct FormatConfig {
     pub level_separator: Cow<'static, str>,
     pub function_bracket_left: Cow<'static, str>,
     pub function_bracket_right: Cow<'static, str>,
+    /// Brackets around the event's field tail. Distinct from the span-arg
+    /// brackets so a line stays readable: `span(arg: 1) {field: 2}`.
+    pub field_bracket_left: Cow<'static, str>,
+    pub field_bracket_right: Cow<'static, str>,
     pub arguments_equality: Cow<'static, str>,
     pub arguments_separator: Cow<'static, str>,
     pub thread_id_prefix: Cow<'static, str>,
@@ -77,14 +87,15 @@ impl Default for FormatConfig {
             mode: RenderMode::Pretty,
             show_target: false,
             show_thread_id: false,
-            show_timestamp: false,
             timestamp_format: TimestampFormat::None,
-            use_level_prefix: true,
+            use_level_prefix: false,
             span_separator: Cow::Borrowed("::"),
             message_separator: Cow::Borrowed(": "),
             level_separator: Cow::Borrowed(" "),
             function_bracket_left: Cow::Borrowed("("),
             function_bracket_right: Cow::Borrowed(")"),
+            field_bracket_left: Cow::Borrowed("{"),
+            field_bracket_right: Cow::Borrowed("}"),
             arguments_equality: Cow::Borrowed(": "),
             arguments_separator: Cow::Borrowed(", "),
             thread_id_prefix: Cow::Borrowed("["),
@@ -125,11 +136,10 @@ pub(crate) fn format_timestamp(format: TimestampFormat) -> String {
 
     match format {
         TimestampFormat::None => String::new(),
-        TimestampFormat::UnixSeconds => SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or_else(|_| String::from("0.000"), |d| {
-                format!("{}.{:03}", d.as_secs(), d.subsec_millis())
-            }),
+        TimestampFormat::UnixSeconds => SystemTime::now().duration_since(UNIX_EPOCH).map_or_else(
+            |_| String::from("0.000"),
+            |d| format!("{}.{:03}", d.as_secs(), d.subsec_millis()),
+        ),
         TimestampFormat::Uptime => {
             let elapsed = process_start().elapsed();
             format!("{}.{:03}", elapsed.as_secs(), elapsed.subsec_millis())
@@ -234,10 +244,7 @@ mod tests {
     fn rfc3339_known_epochs() {
         use std::time::{Duration, UNIX_EPOCH};
         // Epoch
-        assert_eq!(
-            format_rfc3339(UNIX_EPOCH),
-            "1970-01-01T00:00:00.000Z"
-        );
+        assert_eq!(format_rfc3339(UNIX_EPOCH), "1970-01-01T00:00:00.000Z");
         // 2026-05-05T14:23:45.123Z
         // 56 years × 365 + 14 leap days = 20454 days through 2025-12-31;
         // + 124 days through 2026-05-05 = 20578 days.
