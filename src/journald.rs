@@ -21,9 +21,14 @@ use crate::output::EntryMeta;
 /// Where systemd listens for native journal entries.
 pub(crate) const JOURNALD_PATH: &str = "/run/systemd/journal/socket";
 
-/// Beyond this a single entry is truncated rather than risking `EMSGSIZE`;
-/// the socket's buffer, not this constant, is the real limit.
+/// Upper bound on one datagram. This is a safety margin, not the real limit:
+/// the kernel's `EMSGSIZE` threshold depends on the socket buffer and can be
+/// lower, which is why `send_lossy` backs off on that error.
 const MAX_ENTRY_BYTES: usize = 128 * 1024;
+
+/// `EMSGSIZE`. Hardcoded because pulling in `libc` for one constant is not
+/// worth it, and the stable `ErrorKind` for it varies by target.
+const EMSGSIZE: i32 = 90;
 
 pub(crate) struct JournaldSink {
     socket: UnixDatagram,
@@ -48,9 +53,15 @@ impl JournaldSink {
         self.identifier = identifier.into();
     }
 
-    /// Send one entry. Errors are returned rather than logged: a broken journal
-    /// socket must not make the layer recurse into itself.
+    /// Send one entry unchanged. The layer always goes through `send_lossy`,
+    /// but tests use this to assert on the encoded payload.
+    #[cfg(test)]
     pub(crate) fn send(&self, line: &str, meta: &EntryMeta<'_>) -> io::Result<()> {
+        self.socket.send(&self.encode(line, meta)).map(|_| ())
+    }
+
+    /// Serialise one entry into the journal's native wire format.
+    fn encode(&self, line: &str, meta: &EntryMeta<'_>) -> Vec<u8> {
         let mut buf = Vec::with_capacity(256 + line.len());
         put_field(&mut buf, "MESSAGE", line);
         put_field(&mut buf, "PRIORITY", priority(meta.level));
@@ -66,26 +77,60 @@ impl JournaldSink {
             put_field(&mut buf, "SPAN_NAME", name);
         }
 
-        self.socket.send(&buf).map(|_| ())
+        buf
     }
 
     /// Same as [`Self::send`] but truncating an oversized entry instead of
     /// failing, so a pathological message cannot silently drop the log line.
+    ///
+    /// `MESSAGE` shares the datagram with `PRIORITY`, `SYSLOG_IDENTIFIER`,
+    /// `TARGET`, `CODE_FILE`, `CODE_LINE` and one `SPAN_NAME` per span, and a
+    /// multi-line value carries a length header on top. Budgeting the whole
+    /// `MAX_ENTRY_BYTES` for the line therefore overshoots and lands on the
+    /// `EMSGSIZE` path this function exists to avoid, so the overhead is
+    /// measured with an empty message first.
     pub(crate) fn send_lossy(&self, line: &str, meta: &EntryMeta<'_>) {
-        let line = if line.len() > MAX_ENTRY_BYTES {
-            // `str` boundaries: slice on a char boundary or the truncation panics.
-            let end = line
-                .char_indices()
-                .map(|(i, _)| i)
-                .take_while(|i| *i <= MAX_ENTRY_BYTES)
-                .last()
-                .unwrap_or(0);
-            format!("{} [truncated {} bytes]", &line[..end], line.len() - end)
-        } else {
-            line.to_owned()
-        };
-        let _ = self.send(&line, meta);
+        let overhead = self.encode("", meta).len();
+        let mut budget = MAX_ENTRY_BYTES.saturating_sub(overhead);
+        loop {
+            let buf = self.encode(&truncate(line, budget), meta);
+            if buf.len() <= MAX_ENTRY_BYTES {
+                // The kernel's limit can sit below MAX_ENTRY_BYTES, so back off
+                // and retry smaller rather than drop the line that truncation
+                // was meant to keep.
+                let retry = match self.socket.send(&buf) {
+                    Ok(_) => return,
+                    Err(e) => e.raw_os_error() == Some(EMSGSIZE) && budget > 1024,
+                };
+                if !retry {
+                    return;
+                }
+                budget /= 2;
+            } else if budget <= 1024 {
+                return;
+            } else {
+                // The `[truncated N bytes]` suffix is itself part of the entry,
+                // so a pass can overshoot by the length of its own marker.
+                budget = budget.saturating_sub(buf.len() - MAX_ENTRY_BYTES + 1);
+            }
+        }
     }
+}
+
+/// Truncate to at most `budget` bytes, on a char boundary, noting what was cut.
+fn truncate(line: &str, budget: usize) -> String {
+    if line.len() <= budget {
+        return line.to_owned();
+    }
+    // Slicing mid-character panics, so walk to the last boundary at or below
+    // the budget instead of indexing.
+    let end = line
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|i| *i <= budget)
+        .last()
+        .unwrap_or(0);
+    format!("{} [truncated {} bytes]", &line[..end], line.len() - end)
 }
 
 /// journald discards fields whose names violate its conventions, so mirror what
@@ -117,7 +162,14 @@ fn sanitize_name(name: &str) -> String {
             out.push('_');
         }
     }
-    out.trim_start_matches('_').to_owned()
+    // A name of only underscores would otherwise sanitise to the empty string,
+    // which `put_field` would write as `=value`, corrupting the entry.
+    let name = out.trim_start_matches('_');
+    if name.is_empty() {
+        "FIELD".to_owned()
+    } else {
+        name.to_owned()
+    }
 }
 
 fn priority(level: tracing::Level) -> &'static str {
@@ -174,6 +226,19 @@ mod tests {
         assert_eq!(sanitize_name("my.field-name"), "MY_FIELD_NAME");
     }
 
+    /// An all-underscore name sanitises to empty, and an empty name would be
+    /// written as `=value`, which journald rejects as malformed.
+    #[test]
+    fn all_underscore_name_still_yields_a_valid_field() {
+        for name in ["_", "___", ".-."] {
+            let mut buf = Vec::new();
+            put_field(&mut buf, name, "v");
+            let written = std::str::from_utf8(&buf).unwrap();
+            assert!(!written.starts_with('='), "{name:?} produced {written:?}");
+            assert_eq!(written, "FIELD=v\n");
+        }
+    }
+
     #[test]
     fn priorities_follow_syslog() {
         assert_eq!(priority(Level::ERROR), "3");
@@ -225,5 +290,46 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&dir);
+    }
+
+    /// The whole entry, metadata included, must fit the datagram budget. A line
+    /// sized to `MAX_ENTRY_BYTES` used to overshoot by its own field overhead and
+    /// hit EMSGSIZE, which `send_lossy` then swallowed.
+    #[test]
+    fn truncated_entry_fits_the_budget_including_metadata() {
+        let dir = std::env::temp_dir().join(format!("ts-jd-fit-{}", std::process::id()));
+        let _ = std::fs::remove_file(&dir);
+        let listener = UnixDatagram::bind(&dir).unwrap();
+        let sink = JournaldSink::connect(&dir).unwrap();
+
+        let spans = ["request", "handler", "db"];
+        let mut meta = meta();
+        meta.spans = &spans;
+
+        let huge = "y".repeat(MAX_ENTRY_BYTES);
+        sink.send_lossy(&huge, &meta);
+
+        let mut buf = vec![0u8; MAX_ENTRY_BYTES * 2];
+        let n = listener.recv(&mut buf).unwrap();
+        assert!(
+            n <= MAX_ENTRY_BYTES,
+            "entry {n} bytes exceeds budget {MAX_ENTRY_BYTES}"
+        );
+        let payload = std::str::from_utf8(&buf[..n]).unwrap();
+        assert!(payload.starts_with("MESSAGE="), "{payload:?}");
+        // Metadata must survive truncation, not be crowded out by the message.
+        for field in ["PRIORITY=4\n", "CODE_LINE=42\n", "SPAN_NAME=db\n"] {
+            assert!(payload.contains(field), "missing {field:?} in entry");
+        }
+
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    #[test]
+    fn truncation_lands_on_a_char_boundary() {
+        let line = "é".repeat(2000);
+        let out = truncate(&line, 101);
+        assert!(out.starts_with(&line[..100]), "{out:?}");
+        assert!(out.contains("[truncated 3900 bytes]"), "{out:?}");
     }
 }

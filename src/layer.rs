@@ -70,6 +70,11 @@ impl SystemdLayer {
     /// Construct a layer that writes formatted lines to standard output.
     /// All formatting options have sensible defaults; chain `with_*`
     /// methods to override them.
+    ///
+    /// No syslog priority prefix is emitted. Under a systemd unit that prefix
+    /// is how `journalctl -p` classifies lines, so a service whose stdout goes
+    /// to the journal wants [`Self::unit_stdout`] instead; `INVOCATION_ID` is
+    /// set in that case and absent outside a unit.
     #[must_use]
     pub fn stdout() -> Self {
         Self {

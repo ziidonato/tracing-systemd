@@ -278,8 +278,12 @@ let terse = SystemdLayer::stdout()
 
 ## Migrating from 0.3 to 0.4
 
-`0.4.0` changes the default output in two visible ways and deprecates one module.
-Nothing is removed yet, so the upgrade compiles, but your lines will look different.
+`0.4.0` changes the default line format and **removes** `tracing_systemd::journald`
+along with the `tracing_journald` re-export. Code that called
+`journald::layer()` or `journald::layer_with_identifier("my-app")` will not
+compile until it moves to `Output::journald()`.
+
+The rest of this section is about behaviour that changes silently.
 
 | Change | Before | After |
 |--------|--------|-------|
@@ -293,7 +297,12 @@ Nothing is removed yet, so the upgrade compiles, but your lines will look differ
 | `tracing_systemd::journald::{layer, layer_with_identifier}` and the `tracing_journald` re-export | formatted only `MESSAGE`; span chains never reached the journal | removed; the transport is built in as `Output::journald()` and carries the full rendered line |
 
 If you relied on the prefixed default, switch `SystemdLayer::stdout()` to
-`SystemdLayer::unit_stdout()`. If you relied on unquoted span arguments, set
+`SystemdLayer::unit_stdout()`. That one does not fail at compile time, and it
+matters: under a systemd unit the `<n>` prefix is how `journalctl -p err` finds
+your errors, so an upgrading service quietly loses level filtering. Check any
+`stdout()` constructor in code that runs under a unit.
+
+If you relied on unquoted span arguments, set
 `with_arguments_equality`/`with_arguments_separator`. The quoting itself is not
 configurable, because it is what keeps `f(s: "a, b")` unambiguous.
 
