@@ -23,7 +23,7 @@ runs under a systemd unit and you want `PRIORITY` inferred from stdout.
 [dependencies]
 tracing            = "0.1"
 tracing-subscriber = "0.3"
-tracing-systemd    = "0.4"
+tracing-systemd    = "0.4.1"
 ```
 
 ```rust
@@ -54,7 +54,7 @@ See `examples/` for more.
 To turn off color output:
 
 ```toml
-tracing-systemd = { version = "0.4", default-features = false }
+tracing-systemd = { version = "0.4.1", default-features = false }
 ```
 
 ## Logging to the journal
@@ -122,7 +122,7 @@ Enable the `json` feature and use `SystemdLayer::json()` to emit one JSON object
 per event:
 
 ```toml
-tracing-systemd = { version = "0.4", features = ["json"] }
+tracing-systemd = { version = "0.4.1", features = ["json"] }
 ```
 
 ```rust,ignore
@@ -275,6 +275,19 @@ let terse = SystemdLayer::stdout()
     .template("{message} {fields}")
     .expect("template");
 ```
+
+## 0.4.1
+
+Fixes a bug in 0.4.0's journald sink. `send_lossy` budgeted the whole datagram
+for `MESSAGE` while the entry also carries `PRIORITY`, `SYSLOG_IDENTIFIER`,
+`TARGET`, `CODE_FILE`, `CODE_LINE` and one `SPAN_NAME` per span, so a near-limit
+line overshot, hit `EMSGSIZE`, and was dropped by the ignored error. The
+overhead is now measured first, and `EMSGSIZE` backs off and retries.
+`sanitize_name` also no longer returns an empty string for an all-underscore
+field name, which used to be written as `=value`.
+
+If you are on 0.4.0, upgrade: the transport could silently lose the largest
+log lines.
 
 ## Migrating from 0.3 to 0.4
 

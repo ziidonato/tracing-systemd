@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "tracing-systemd"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "nu-ansi-term",
  "serde_json",
