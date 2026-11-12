@@ -38,7 +38,16 @@ impl Painter<'_> {
     }
 
     pub(crate) fn write_level(self, out: &mut String, level: tracing::Level) {
-        let text = level.as_str();
+        self.write_level_text(out, level, level.as_str());
+    }
+
+    /// `{level_short}` shares the level's style but not its text: the theme
+    /// colours `INFO`, so it must colour `INF` too or one line shows both.
+    pub(crate) fn write_level_short(self, out: &mut String, level: tracing::Level) {
+        self.write_level_text(out, level, crate::format::template::short_level(level));
+    }
+
+    fn write_level_text(self, out: &mut String, level: tracing::Level, text: &str) {
         #[cfg(feature = "colors")]
         if let Some(theme) = self.theme {
             use std::fmt::Write as _;

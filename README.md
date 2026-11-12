@@ -190,7 +190,9 @@ let layer = SystemdLayer::stdout()
 
 Timestamps are controlled by a single knob: `with_timestamp_format(fmt)` sets the
 format and `TimestampFormat::None` turns them off. `with_timestamps(bool)` is a
-shortcut for RFC 3339 / off.
+shortcut for RFC 3339 / off. `None` means the default pretty line carries no
+timestamp; a template that names `{timestamp}` always renders one (RFC 3339 when
+the config says `None`), because naming the placeholder states the intent.
 
 String-like field values (`&str`, `Debug`, errors) are quoted and escaped in both
 span arguments and the event field tail, so a value containing `, ` or `}`
@@ -224,8 +226,8 @@ let layer = SystemdLayer::stdout()
 ```
 
 ```text
- INFO request      served took_ms: 4
-ERROR request      upstream failed code: 500
+ INFO request      served {took_ms: 4}
+ERROR request      upstream failed {code: 500}
 ```
 
 Placeholders fall into two groups:
@@ -236,12 +238,12 @@ Placeholders fall into two groups:
 | `{target}` | module path |
 | `{message}` | the event's message field |
 | `{thread_id}` | OS thread id |
-| `{timestamp}` | formatted per `with_timestamp_format`; defaults to RFC 3339 |
+| `{timestamp}` | formatted per `with_timestamp_format`; RFC 3339 when unset or `None` |
 | `{file}` / `{line}` | call site |
 | `{spans}` | the parent chain, `a(x: 1)::b()::` |
-| `{leaf}` | bare name of the innermost span |
+| `{leaf}` | the innermost span, name plus arguments (`handler()`) |
 | `{span}` | parent chain plus the leaf, rendered in full |
-| `{fields}` | every event field except `message` |
+| `{fields}` | every event field except `message`, wrapped in `with_field_bracket_*` |
 
 **Anything else is an event field.** `{rows}` renders the `rows` field from
 `info!(rows = 3, "done")`. A field that the event doesn't carry renders as empty
@@ -263,10 +265,19 @@ on an event with no extra fields prints `served ` with a trailing space. Put the
 optional part last, or accept the space.
 
 Templates are bounded at compile time. A width above 1024, or more than 1024
-placeholders, is rejected by `template()` rather than allocating per event.
+placeholders, is rejected by `template()`. Rendering a placeholder appends into
+the line buffer and `{fields}` borrows the event's fields, so allocation is
+bounded by the template, not by what the event carries — not unbounded, and not
+zero either.
 
 Templates replace the entire pretty line, so `with_target`, `with_thread_ids`,
-and the separator knobs no longer apply. Colours still do, per element.
+and the separator knobs no longer apply. Colours still do, per element,
+including `{level_short}`.
+
+`{fields}` is the exception: it reads `with_arguments_separator`,
+`with_arguments_equality` and `with_field_bracket_*`, so a template's field tail
+matches the default renderer's.
+
 A template also applies to the journald sink, which is the way to give the
 journal a terser `MESSAGE` than the terminal while keeping both readable:
 

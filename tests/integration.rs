@@ -267,7 +267,7 @@ fn template_controls_the_whole_line() {
     let out = capture(layer, || {
         info!(rows = 3u64, "done");
     });
-    assert_eq!(out.trim_end(), " INFO integration: done rows: 3");
+    assert_eq!(out.trim_end(), " INFO integration: \"done\" {rows: 3}");
 }
 
 #[test]
@@ -280,7 +280,7 @@ fn template_can_drop_the_span_chain() {
         let _g = span.enter();
         warn!("careful");
     });
-    assert_eq!(out.trim_end(), "WRN careful");
+    assert_eq!(out.trim_end(), "WRN \"careful\"");
 }
 
 #[test]
@@ -293,7 +293,7 @@ fn template_can_promote_a_span_field() {
         let _g = span.enter();
         info!("hi");
     });
-    assert_eq!(out.trim_end(), "hi span=handler");
+    assert_eq!(out.trim_end(), "\"hi\" span=handler()");
 }
 
 #[test]

@@ -75,9 +75,13 @@ pub enum TemplateError {
     /// The part after `:` was not a recognised alignment spec.
     BadSpec(String),
     /// More than `MAX_PLACEHOLDERS` (1024) placeholders in one template.
-    TooManyPlaceholders,
+    TooManyPlaceholders(String),
     /// An alignment width above `MAX_WIDTH` (1024).
-    WidthTooLarge,
+    WidthTooLarge(String),
+    /// A `{` inside a placeholder body, e.g. `{level{>5}}`.
+    NestedBrace(String),
+    /// A placeholder name that is not an identifier, e.g. `{level!}`.
+    BadName(String),
 }
 
 /// Quote a template for an error message, truncating rather than dumping a
@@ -109,10 +113,28 @@ impl fmt::Display for TemplateError {
                 "unrecognised alignment spec in template {}; use `{{name:>5}}`, `{{name:<5}}` or `{{name:^5}}`",
                 quote(t)
             ),
-            Self::TooManyPlaceholders => {
-                write!(f, "template has more than {MAX_PLACEHOLDERS} placeholders")
+            Self::TooManyPlaceholders(t) => write!(
+                f,
+                "template has more than {MAX_PLACEHOLDERS} placeholders: {}",
+                quote(t)
+            ),
+            Self::WidthTooLarge(t) => {
+                write!(
+                    f,
+                    "alignment width above {MAX_WIDTH} in template {}",
+                    quote(t)
+                )
             }
-            Self::WidthTooLarge => write!(f, "alignment width above {MAX_WIDTH}"),
+            Self::NestedBrace(t) => write!(
+                f,
+                "nested `{{` inside a placeholder in template {} (placeholders cannot contain braces)",
+                quote(t)
+            ),
+            Self::BadName(t) => write!(
+                f,
+                "placeholder name is not an identifier in template {} (letters, digits and `_` only, as in `{{{{level:>5}}}}`)",
+                quote(t)
+            ),
         }
     }
 }
@@ -161,7 +183,14 @@ impl Template {
                     }
                     placeholders += 1;
                     if placeholders > MAX_PLACEHOLDERS {
-                        return Err(TemplateError::TooManyPlaceholders);
+                        return Err(TemplateError::TooManyPlaceholders(source));
+                    }
+                    // The body runs to the first `}`, so a second `{` inside it
+                    // would silently become part of the name and render empty.
+                    // Checked here, before the name/spec split, so the whole
+                    // class gets one variant instead of name-only detection.
+                    if body.contains('{') {
+                        return Err(TemplateError::NestedBrace(source));
                     }
                     segments.push(Segment::Placeholder(Placeholder::parse(&body, &source)?));
                 }
@@ -185,12 +214,16 @@ impl Template {
         painter: Painter<'_>,
     ) -> String {
         let mut out = String::with_capacity(self.source.len() + 64);
+        // Reused across placeholders: alignment measures the painted piece
+        // before padding, so it needs a buffer of its own, but not a fresh
+        // allocation per placeholder.
+        let mut piece = String::new();
 
         for segment in &self.segments {
             match segment {
                 Segment::Literal(text) => out.push_str(text),
                 Segment::Placeholder(ph) => {
-                    let mut piece = String::new();
+                    piece.clear();
                     ph.write_value(&mut piece, cfg, input, painter);
                     // Padding is measured on the painted string so ANSI
                     // escapes do not count toward the column width.
@@ -213,12 +246,19 @@ impl Placeholder {
         if name.is_empty() {
             return Err(TemplateError::EmptyName(source.to_owned()));
         }
+        // A typo inside the braces is the one class the brace check cannot see:
+        // `{level }` and `{lev el}` would otherwise parse and render empty.
+        if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(TemplateError::BadName(source.to_owned()));
+        }
 
         let align = match spec {
             None | Some("") => Align::None,
             Some(spec) => match parse_align(spec) {
                 Ok(align) => align,
-                Err(SpecError::TooWide) => return Err(TemplateError::WidthTooLarge),
+                Err(SpecError::TooWide) => {
+                    return Err(TemplateError::WidthTooLarge(source.to_owned()));
+                }
                 Err(SpecError::Malformed) => {
                     return Err(TemplateError::BadSpec(source.to_owned()));
                 }
@@ -242,11 +282,13 @@ impl Placeholder {
 
         match name {
             "level" => painter.write_level(out, input.level),
-            "level_short" => out.push_str(short_level(input.level)),
+            "level_short" => painter.write_level_short(out, input.level),
             "target" => painter.write_target(out, input.target),
+            // Quoted and escaped like a string field, so the invariant holds
+            // for the message slot too and not only the field tail.
             "message" => {
                 if let Some(msg) = input.fields.get("message") {
-                    out.push_str(&msg.to_string());
+                    painter.write_field_value(out, msg);
                 }
             }
             "thread_id" => {
@@ -267,7 +309,7 @@ impl Placeholder {
             "spans" => out.push_str(&render_parents(cfg, painter, input.parents)),
             "leaf" => {
                 if let Some(leaf) = input.leaf {
-                    painter.write_span_name(out, leaf.name);
+                    out.push_str(&render_span_name(cfg, painter, leaf));
                 }
             }
             "span" => {
@@ -278,6 +320,11 @@ impl Placeholder {
             }
             "fields" => {
                 let rest = strip_message(input.fields);
+                // Brackets match the default renderer, so `{fields}` and the
+                // default tail look the same in a line that mixes both.
+                if !rest.is_empty() {
+                    out.push_str(&cfg.field_bracket_left);
+                }
                 let mut first = true;
                 for (fname, value) in &rest {
                     if !first {
@@ -287,6 +334,9 @@ impl Placeholder {
                     painter.write_field_name(out, fname);
                     out.push_str(&cfg.arguments_equality);
                     painter.write_field_value(out, value);
+                }
+                if !rest.is_empty() {
+                    out.push_str(&cfg.field_bracket_right);
                 }
             }
             // Anything else is an event field; a missing one renders empty so
@@ -311,7 +361,7 @@ fn strip_message(
         .collect()
 }
 
-fn short_level(level: tracing::Level) -> &'static str {
+pub(crate) fn short_level(level: tracing::Level) -> &'static str {
     match level {
         tracing::Level::TRACE => "TRC",
         tracing::Level::DEBUG => "DBG",
@@ -458,7 +508,7 @@ mod tests {
         let f = fields(&[("message", FieldValue::Str("served".into()))]);
         assert_eq!(
             render("{level} {target}: {message}", tracing::Level::INFO, &f),
-            "INFO app::net: served"
+            "INFO app::net: \"served\""
         );
     }
 
@@ -525,8 +575,74 @@ mod tests {
         ]);
         assert_eq!(
             render("{message} {fields}", tracing::Level::INFO, &f),
-            "done a: 1, b: true"
+            "\"done\" {a: 1, b: true}"
         );
+    }
+
+    #[test]
+    fn fields_without_extras_prints_no_bracket() {
+        let f = fields(&[("message", FieldValue::Str("done".into()))]);
+        assert_eq!(
+            render("{message}{fields}", tracing::Level::INFO, &f),
+            "\"done\""
+        );
+    }
+
+    #[test]
+    fn fields_honours_bracket_knobs() {
+        let mut c = cfg();
+        c.field_bracket_left = "[".into();
+        c.field_bracket_right = "]".into();
+        c.arguments_separator = "; ".into();
+        c.arguments_equality = "=".into();
+        let f = fields(&[("a", FieldValue::U64(1)), ("b", FieldValue::U64(2))]);
+        let t = Template::parse("{fields}").expect("template parses");
+        let input = EventInput {
+            level: tracing::Level::INFO,
+            target: "app::net",
+            file: "src/net.rs",
+            line: 42,
+            parents: &[],
+            leaf: None,
+            fields: &f,
+        };
+        assert_eq!(t.render(&c, &input, Painter::mono()), "[a=1; b=2]");
+    }
+
+    #[test]
+    fn nested_brace_is_an_error() {
+        assert!(matches!(
+            Template::parse("{level{>5}}").unwrap_err(),
+            TemplateError::NestedBrace(_)
+        ));
+    }
+
+    #[test]
+    fn placeholder_name_must_be_an_identifier() {
+        // A body ending in `}` can hide a stray name `{level }` would accept;
+        // punctuation inside the name is the same typo class as a nested brace.
+        assert!(matches!(
+            Template::parse("{level!}").unwrap_err(),
+            TemplateError::BadName(_)
+        ));
+        assert!(matches!(
+            Template::parse("{a b}").unwrap_err(),
+            TemplateError::BadName(_)
+        ));
+    }
+
+    #[test]
+    fn width_and_count_errors_carry_the_template() {
+        let wide = "{level:>999999}";
+        match Template::parse(wide).unwrap_err() {
+            TemplateError::WidthTooLarge(src) => assert_eq!(src, wide),
+            other => panic!("expected WidthTooLarge, got {other:?}"),
+        }
+        let many = "{level}".repeat(2_000);
+        match Template::parse(many.as_str()).unwrap_err() {
+            TemplateError::TooManyPlaceholders(src) => assert_eq!(src, many),
+            other => panic!("expected TooManyPlaceholders, got {other:?}"),
+        }
     }
 
     #[test]

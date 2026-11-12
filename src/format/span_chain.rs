@@ -55,15 +55,22 @@ pub(crate) fn render_chain(
 /// [`render_chain`] prepends the target when `show_target` is set, which a
 /// template must not inherit: `{spans}` names the spans, and silently emitting
 /// a leading `::` there would be a formatting bug the user cannot configure away.
+///
+/// The separator goes *between* spans, not after each one: `render_chain` can
+/// append a trailing one because the default renderer always writes the leaf
+/// next, but a template may end on `{spans}` with nothing following, and a
+/// dangling `::` there is not configurable away.
 pub(crate) fn render_parents(
     cfg: &FormatConfig,
     painter: Painter<'_>,
     parents: &[SpanLink],
 ) -> String {
     let mut chain = String::new();
-    for link in parents {
+    for (i, link) in parents.iter().enumerate() {
+        if i > 0 {
+            chain.push_str(&cfg.span_separator);
+        }
         chain.push_str(&render_span_name(cfg, painter, link));
-        chain.push_str(&cfg.span_separator);
     }
     chain
 }
