@@ -244,6 +244,11 @@ entirely, either set `ColorMode::Never` or build without default features:
 tracing-systemd = { version = "0.4", default-features = false }
 ```
 
+Set `ColorMode::Never` whenever stdout is not a terminal — captured in a test,
+redirected to a file, or piped to a parser. TTY detection cannot see a sink it is
+not attached to, so `Auto` is right for the console and wrong for everything
+else, and there is no per-write override: the mode is per layer.
+
 `ColorTheme` has one slot per rendered element. **Only the five levels carry colour by
 default** — every other slot is `Style::new()`, so the default palette renders exactly
 the line 0.1 did. Fill a slot to colour it:
