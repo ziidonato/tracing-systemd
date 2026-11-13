@@ -14,7 +14,7 @@
 use std::fmt;
 
 use crate::format::event::EventInput;
-use crate::format::paint::Painter;
+use crate::format::paint::{Painter, Quoting};
 use crate::format::span_chain::{render_parents, render_span_name};
 use crate::format::{FormatConfig, TimestampFormat, current_thread_id_int, format_timestamp};
 
@@ -36,6 +36,40 @@ enum Segment {
 struct Placeholder {
     name: String,
     align: Align,
+    content: Content,
+    quoting: Quoting,
+}
+
+/// What a placeholder renders, decided at compile time so the render path is a
+/// flat dispatch and the modifier set can differ per kind.
+///
+/// Plain covers the metadata slots (level, target, timestamp, call site) that
+/// carry no string values, so they take `:plain` but not `:raw`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Content {
+    Plain,
+    Theme,
+    Span,
+    Fields,
+}
+
+fn parse_align_checked(spec: &str, source: &str) -> Result<Align, TemplateError> {
+    match parse_align(spec) {
+        Ok(align) => Ok(align),
+        Err(SpecError::TooWide) => Err(TemplateError::WidthTooLarge(source.to_owned())),
+        Err(SpecError::Malformed) => Err(TemplateError::BadSpec(source.to_owned())),
+    }
+}
+
+/// The content kind for a built-in name, or `None` for an event field.
+fn content_of(name: &str) -> Option<Content> {
+    Some(match name {
+        "spans" | "leaf" | "span" => Content::Span,
+        "fields" => Content::Fields,
+        "message" | "level" | "level_short" | "target" | "thread_id" | "timestamp" | "file"
+        | "line" => Content::Theme,
+        _ => return None,
+    })
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -82,6 +116,9 @@ pub enum TemplateError {
     NestedBrace(String),
     /// A placeholder name that is not an identifier, e.g. `{level!}`.
     BadName(String),
+    /// A modifier that is not recognised, or not available on that placeholder.
+    /// e.g. `{level:x}` or `{fields:raw-something}`.
+    BadModifier(String, String),
 }
 
 /// Quote a template for an error message, truncating rather than dumping a
@@ -133,6 +170,11 @@ impl fmt::Display for TemplateError {
             Self::BadName(t) => write!(
                 f,
                 "placeholder name is not an identifier in template {} (letters, digits and `_` only, as in `{{{{level:>5}}}}`)",
+                quote(t)
+            ),
+            Self::BadModifier(m, t) => write!(
+                f,
+                "unrecognised placeholder modifier `{m}` in template {}; known: `plain`, `nocolor`, `raw`, `unquoted` (raw/unquoted only on `{{message}}`, `{{fields}}` and event fields)",
                 quote(t)
             ),
         }
@@ -236,12 +278,31 @@ impl Template {
     }
 }
 
+/// Whether a `:`-segment is one of the per-placeholder switches.
+fn is_modifier(seg: &str) -> bool {
+    matches!(seg, "plain" | "nocolor" | "no_color" | "raw" | "unquoted")
+}
+
+/// Split a `:`-suffix into its modifier part and its alignment part.
+fn split_spec(spec: &str) -> (&str, &str) {
+    // An alignment spec starts with `<`, `>` or `^`; every leading `.`-segment
+    // that does not is a modifier. Decided by shape rather than by a separator
+    // so the common `{name:>5}` keeps Rust's familiar spelling.
+    if let Some(at) = spec.find(['<', '>', '^']) {
+        if at == 0 {
+            return ("", spec);
+        }
+        let prev = spec.as_bytes()[at - 1];
+        if prev == b'.' || prev == b':' {
+            return (&spec[..at - 1], &spec[at..]);
+        }
+    }
+    (spec, "")
+}
+
 impl Placeholder {
     fn parse(body: &str, source: &str) -> Result<Self, TemplateError> {
-        let (name, spec) = match body.split_once(':') {
-            Some((n, s)) => (n, Some(s)),
-            None => (body, None),
-        };
+        let (name, spec) = body.split_once(':').map_or((body, ""), |(n, s)| (n, s));
 
         if name.is_empty() {
             return Err(TemplateError::EmptyName(source.to_owned()));
@@ -252,26 +313,106 @@ impl Placeholder {
             return Err(TemplateError::BadName(source.to_owned()));
         }
 
-        let align = match spec {
-            None | Some("") => Align::None,
-            Some(spec) => match parse_align(spec) {
-                Ok(align) => align,
-                Err(SpecError::TooWide) => {
-                    return Err(TemplateError::WidthTooLarge(source.to_owned()));
+        // An alignment spec starts with `<`, `>` or `^`; every leading segment
+        // that does not is a modifier. Decided by shape rather than by a
+        // separator so the common `{name:>5}` keeps Rust's familiar spelling.
+        let (mods, align_spec) = split_spec(spec);
+
+        // A colon-suffix that names no alignment and no known modifier is the
+        // old "bad spec" spelling; report it before the loop so `{level:wat}`
+        // keeps its historical variant.
+        // A colon word that is neither a modifier nor an alignment is a typo:
+        // `{level:wat}` and `{level:>wat}` both fail at startup. The former is
+        // reported as a bad modifier (the word was the mistake), the latter as
+        // a bad spec (the width was).
+        if !spec.is_empty()
+            && !spec.contains(['<', '>', '^'])
+            && !spec
+                .split(['.', ':'])
+                .filter(|m| !m.is_empty())
+                .all(is_modifier)
+        {
+            return Err(TemplateError::BadSpec(source.to_owned()));
+        }
+
+        let mut quoting = Quoting::Quote;
+        let mut plain = false;
+        for m in mods.split(['.', ':']).filter(|m| !m.is_empty()) {
+            match m {
+                "plain" | "nocolor" | "no_color" => plain = true,
+                "raw" | "unquoted" => quoting = Quoting::Raw,
+                other => {
+                    return Err(TemplateError::BadModifier(
+                        other.to_owned(),
+                        source.to_owned(),
+                    ));
                 }
-                Err(SpecError::Malformed) => {
-                    return Err(TemplateError::BadSpec(source.to_owned()));
-                }
-            },
+            }
+        }
+
+        let mut content = content_of(name).unwrap_or(Content::Theme);
+        if plain {
+            content = Content::Plain;
+        }
+
+        let align = if align_spec.is_empty() {
+            Align::None
+        } else {
+            parse_align_checked(align_spec, source)?
         };
 
         Ok(Self {
             name: name.to_owned(),
             align,
+            content,
+            quoting,
         })
     }
 
     fn write_value(
+        &self,
+        out: &mut String,
+        cfg: &FormatConfig,
+        input: &EventInput<'_>,
+        painter: Painter<'_>,
+    ) {
+        // Per-element switches land on the painter, so a placeholder can be
+        // rendered without colour without every other element following it.
+        let p = match self.content {
+            Content::Plain => painter.plain(),
+            Content::Theme | Content::Span => painter.with_quoting(self.quoting),
+            // `{fields}` follows the `quote_strings` knob but never takes
+            // `:raw`: the tail's job is to stay unambiguous against the
+            // separators, and one placeholder must not turn that off.
+            Content::Fields => painter.with_quoting(Quoting::from_bool(cfg.quote_strings)),
+        };
+
+        match self.content {
+            Content::Fields => {
+                let rest = strip_message(input.fields);
+                // Brackets match the default renderer, so `{fields}` and the
+                // default tail look the same in a line that mixes both.
+                if !rest.is_empty() {
+                    out.push_str(&cfg.field_bracket_left);
+                }
+                write_pairs(out, cfg, p, &rest);
+                if !rest.is_empty() {
+                    out.push_str(&cfg.field_bracket_right);
+                }
+            }
+            Content::Span => {
+                out.push_str(&render_parents(cfg, p, input.parents));
+                if let Some(leaf) = input.leaf {
+                    out.push_str(&render_span_name(cfg, p, leaf));
+                }
+            }
+            Content::Plain | Content::Theme => {
+                self.write_named(out, cfg, input, p);
+            }
+        }
+    }
+
+    fn write_named(
         &self,
         out: &mut String,
         cfg: &FormatConfig,
@@ -284,8 +425,8 @@ impl Placeholder {
             "level" => painter.write_level(out, input.level),
             "level_short" => painter.write_level_short(out, input.level),
             "target" => painter.write_target(out, input.target),
-            // Quoted and escaped like a string field, so the invariant holds
-            // for the message slot too and not only the field tail.
+            // Quoting follows `with_quotes`: quoted makes the tail
+            // unambiguous, raw keeps the journal's `MESSAGE` free of escapes.
             "message" => {
                 if let Some(msg) = input.fields.get("message") {
                     painter.write_field_value(out, msg);
@@ -302,10 +443,10 @@ impl Placeholder {
                     TimestampFormat::None => TimestampFormat::Rfc3339,
                     other => other,
                 };
-                out.push_str(&format_timestamp(fmt));
+                painter.write_timestamp(out, &format_timestamp(fmt));
             }
-            "file" => out.push_str(input.file),
-            "line" => out.push_str(&input.line.to_string()),
+            "file" => painter.write_file(out, input.file),
+            "line" => painter.write_line(out, input.line),
             "spans" => out.push_str(&render_parents(cfg, painter, input.parents)),
             "leaf" => {
                 if let Some(leaf) = input.leaf {
@@ -318,27 +459,9 @@ impl Placeholder {
                     out.push_str(&render_span_name(cfg, painter, leaf));
                 }
             }
-            "fields" => {
-                let rest = strip_message(input.fields);
-                // Brackets match the default renderer, so `{fields}` and the
-                // default tail look the same in a line that mixes both.
-                if !rest.is_empty() {
-                    out.push_str(&cfg.field_bracket_left);
-                }
-                let mut first = true;
-                for (fname, value) in &rest {
-                    if !first {
-                        out.push_str(&cfg.arguments_separator);
-                    }
-                    first = false;
-                    painter.write_field_name(out, fname);
-                    out.push_str(&cfg.arguments_equality);
-                    painter.write_field_value(out, value);
-                }
-                if !rest.is_empty() {
-                    out.push_str(&cfg.field_bracket_right);
-                }
-            }
+            // Unreachable: `Content::Fields` dispatches before the name is
+            // looked at.
+            "fields" => {}
             // Anything else is an event field; a missing one renders empty so
             // one template can serve events that carry different fields.
             other => {
@@ -359,6 +482,26 @@ fn strip_message(
         .filter(|(k, _)| **k != "message")
         .map(|(k, v)| (*k, v))
         .collect()
+}
+
+/// Same as [`write_fields`] for the `(name, value)` pairs `strip_message`
+/// yields, so the `{fields}` path does not rebuild a map per event.
+fn write_pairs(
+    out: &mut String,
+    cfg: &FormatConfig,
+    painter: Painter<'_>,
+    fields: &[(&str, &crate::visit::FieldValue)],
+) {
+    let mut first = true;
+    for (name, value) in fields {
+        if !first {
+            out.push_str(&cfg.arguments_separator);
+        }
+        first = false;
+        painter.write_field_name(out, name);
+        out.push_str(&cfg.arguments_equality);
+        painter.write_field_value(out, value);
+    }
 }
 
 pub(crate) fn short_level(level: tracing::Level) -> &'static str {
@@ -643,6 +786,130 @@ mod tests {
             TemplateError::TooManyPlaceholders(src) => assert_eq!(src, many),
             other => panic!("expected TooManyPlaceholders, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn quote_modifier_controls_string_values() {
+        let cfg = FormatConfig::default();
+        let mut f = crate::visit::FieldMap::new();
+        f.insert("message", crate::visit::FieldValue::Str("done".into()));
+        f.insert("path", crate::visit::FieldValue::Str("/api".into()));
+        f.insert("rows", crate::visit::FieldValue::U64(3));
+        let input = EventInput {
+            level: tracing::Level::INFO,
+            target: "app",
+            file: "",
+            line: 0,
+            parents: &[],
+            leaf: None,
+            fields: &f,
+        };
+
+        let quoted = Template::parse("{message} {fields}").unwrap();
+        assert_eq!(
+            quoted.render(&cfg, &input, Painter::mono()),
+            "\"done\" {path: \"/api\", rows: 3}"
+        );
+
+        // `{fields}` follows `quote_strings`; only `{message}` takes `:raw`
+        // on its own, so this test isolates the knob by using both together.
+        let mut no_quotes = cfg.clone();
+        no_quotes.quote_strings = false;
+        let raw = Template::parse("{message:raw} {fields}").unwrap();
+        assert_eq!(
+            raw.render(&no_quotes, &input, Painter::mono()),
+            "done {path: /api, rows: 3}"
+        );
+        // Without the knob the tail keeps its quotes even next to a raw message.
+        let t = Template::parse("{message:raw} {fields}").unwrap();
+        assert_eq!(
+            t.render(&cfg, &input, Painter::mono()),
+            "done {path: \"/api\", rows: 3}"
+        );
+
+        // Numbers are never quoted, so the modifier changes nothing for them.
+        assert_eq!(
+            Template::parse("{rows:raw}")
+                .unwrap()
+                .render(&cfg, &input, Painter::mono()),
+            "3"
+        );
+    }
+
+    #[test]
+    fn layer_quotes_knob_reaches_the_default_renderer() {
+        let cfg = FormatConfig {
+            quote_strings: false,
+            ..FormatConfig::default()
+        };
+        let mut f = crate::visit::FieldMap::new();
+        f.insert("message", crate::visit::FieldValue::Str("hi".into()));
+        let input = EventInput {
+            level: tracing::Level::INFO,
+            target: "app",
+            file: "",
+            line: 0,
+            parents: &[],
+            leaf: None,
+            fields: &f,
+        };
+        assert!(
+            crate::format::event::render_event(&cfg, &input, Painter::mono()).contains(" hi"),
+            "{}",
+            crate::format::event::render_event(&cfg, &input, Painter::mono())
+        );
+    }
+
+    #[test]
+    fn plain_modifier_moves_only_that_element() {
+        let cfg = FormatConfig::default();
+        let mut f = crate::visit::FieldMap::new();
+        f.insert("message", crate::visit::FieldValue::Str("msg".into()));
+        let input = EventInput {
+            level: tracing::Level::INFO,
+            target: "app",
+            file: "",
+            line: 0,
+            parents: &[],
+            leaf: None,
+            fields: &f,
+        };
+
+        // `Painter::mono` emits no escapes either way; the point is that the
+        // modifier parses, dispatches and leaves the other placeholders alone.
+        let t = Template::parse("{level:plain} {level} {message:nocolor}").unwrap();
+        assert_eq!(t.render(&cfg, &input, Painter::mono()), "INFO INFO \"msg\"");
+        assert!(Template::parse("{message:plain}").is_ok());
+
+        // `raw` parses anywhere; on a metadata slot it simply has no value to
+        // act on, so the line is unchanged rather than an error at startup.
+        assert!(Template::parse("{level:raw}").is_ok());
+        assert!(matches!(
+            Template::parse("{message:shiny:>6}").unwrap_err(),
+            TemplateError::BadModifier(name, _) if name == "shiny"
+        ));
+    }
+
+    #[test]
+    fn modifier_and_width_compose() {
+        let cfg = FormatConfig::default();
+        let mut f = crate::visit::FieldMap::new();
+        f.insert("message", crate::visit::FieldValue::Str("hi".into()));
+        let input = EventInput {
+            level: tracing::Level::INFO,
+            target: "app",
+            file: "",
+            line: 0,
+            parents: &[],
+            leaf: None,
+            fields: &f,
+        };
+        // Alignment is measured on the rendered piece, so `raw` shortens it
+        // by two and the padding follows.
+        let t = Template::parse("{message:raw:>6}|").unwrap();
+        assert_eq!(t.render(&cfg, &input, Painter::mono()), "    hi|");
+        let q = Template::parse("{message:>6}|").unwrap();
+        assert_eq!(q.render(&cfg, &input, Painter::mono()), "  \"hi\"|");
     }
 
     #[test]

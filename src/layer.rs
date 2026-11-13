@@ -10,7 +10,7 @@ use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 
 use crate::format::event::{EventInput, render_event};
-use crate::format::paint::Painter;
+use crate::format::paint::{Painter, Quoting};
 use crate::format::span_chain::SpanLink;
 use crate::format::template::Template;
 use crate::format::{FormatConfig, TimestampFormat, syslog_prefix};
@@ -348,6 +348,32 @@ impl SystemdLayer {
         self
     }
 
+    /// Quote and escape string-like values in `{fields}`, the field tail and
+    /// `{message}`. Default: `true`.
+    ///
+    /// Quotes are what make a value containing `", "` or `}` unambiguous, so
+    /// turning this off means a field value can be read as a separator or a
+    /// closing bracket. The usual reason to want it off is the journal: `MESSAGE`
+    /// reads better without `\"done\"`. A single placeholder can opt out with
+    /// `{message:raw}` instead of switching the whole line.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tracing_systemd::SystemdLayer;
+    ///
+    /// let layer = SystemdLayer::stdout()
+    ///     .with_quotes(false)
+    ///     .template("{message} {fields}")
+    ///     .expect("template");
+    /// # let _ = layer;
+    /// ```
+    #[must_use]
+    pub fn with_quotes(mut self, quote: bool) -> Self {
+        self.config.quote_strings = quote;
+        self
+    }
+
     /// Set the [`ColorTheme`]. Default: [`ColorTheme::default`] (matches 0.1).
     #[cfg(feature = "colors")]
     #[cfg_attr(docsrs, doc(cfg(feature = "colors")))]
@@ -471,13 +497,14 @@ where
 impl SystemdLayer {
     #[cfg_attr(not(feature = "colors"), allow(clippy::unused_self))]
     fn painter(&self) -> Painter<'_> {
+        let quoting = Quoting::from_bool(self.config.quote_strings);
         #[cfg(feature = "colors")]
         {
             if self.color_mode.resolve_now(self.output.is_terminal()) {
-                return Painter::themed(&self.color_theme);
+                return Painter::themed(&self.color_theme).with_quoting(quoting);
             }
         }
-        Painter::mono()
+        Painter::mono().with_quoting(quoting)
     }
 
     fn render(&self, input: &EventInput<'_>) -> String {

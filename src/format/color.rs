@@ -66,6 +66,9 @@ pub struct ColorTheme {
     pub field_value: Style,
     pub target: Style,
     pub thread_id: Style,
+    pub timestamp: Style,
+    pub file: Style,
+    pub line: Style,
 }
 
 impl ColorTheme {
@@ -85,6 +88,9 @@ impl ColorTheme {
             field_value: Style::new(),
             target: Style::new(),
             thread_id: Style::new(),
+            timestamp: Style::new(),
+            file: Style::new(),
+            line: Style::new(),
         }
     }
 
@@ -114,6 +120,9 @@ impl Default for ColorTheme {
             field_value: Style::new(),
             target: Style::new(),
             thread_id: Style::new(),
+            timestamp: Style::new(),
+            file: Style::new(),
+            line: Style::new(),
         }
     }
 }
@@ -191,6 +200,38 @@ mod tests {
         assert!(out.contains("33mtgt"), "target unstyled: {out:?}");
         assert!(out.contains("35ma"), "field_name unstyled: {out:?}");
         assert!(out.contains("34m"), "field_value unstyled: {out:?}");
+    }
+
+    #[test]
+    fn timestamp_file_line_styles_reach_the_renderer() {
+        use crate::format::FormatConfig;
+        use crate::format::event::EventInput;
+        use crate::format::paint::Painter;
+        use crate::format::template::Template;
+        use std::collections::BTreeMap;
+
+        // These three carried no theme slot before, so the only way to see the
+        // style land is to name them in a template.
+        let theme = ColorTheme {
+            timestamp: Style::new().fg(Color::Cyan),
+            file: Style::new().fg(Color::Magenta),
+            line: Style::new().fg(Color::Blue),
+            ..ColorTheme::monochrome()
+        };
+        let fields = BTreeMap::new();
+        let input = EventInput {
+            level: tracing::Level::INFO,
+            target: "tgt",
+            file: "src/f.rs",
+            line: 7,
+            parents: &[],
+            leaf: None,
+            fields: &fields,
+        };
+        let t = Template::parse("{file}:{line}").unwrap();
+        let out = t.render(&FormatConfig::default(), &input, Painter::themed(&theme));
+        assert!(out.contains("35msrc/f.rs"), "file unstyled: {out:?}");
+        assert!(out.contains("34m7"), "line unstyled: {out:?}");
     }
 
     #[test]

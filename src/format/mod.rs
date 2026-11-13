@@ -79,6 +79,9 @@ pub(crate) struct FormatConfig {
     pub arguments_separator: Cow<'static, str>,
     pub thread_id_prefix: Cow<'static, str>,
     pub thread_id_suffix: Cow<'static, str>,
+    /// Quote and escape string-like values. Off means a value containing `, `
+    /// or `}` can be read as a separator or bracket — opt-in ambiguity.
+    pub quote_strings: bool,
 }
 
 impl Default for FormatConfig {
@@ -100,6 +103,7 @@ impl Default for FormatConfig {
             arguments_separator: Cow::Borrowed(", "),
             thread_id_prefix: Cow::Borrowed("["),
             thread_id_suffix: Cow::Borrowed("] "),
+            quote_strings: true,
         }
     }
 }
